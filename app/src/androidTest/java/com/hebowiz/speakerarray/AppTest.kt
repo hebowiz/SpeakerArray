@@ -28,6 +28,27 @@ class AppTest {
     private fun shell(command: String) {
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command).use {fd -> java.io.FileInputStream(fd.fileDescriptor).readBytes()}
     }
+    @Test fun autoFirPermissionFailureAndImmediateCancelPreserveSettings() {
+        init()
+        rule.runOnIdle {
+            val p=Processing(length=257,phaseDeg=90.0,delayUs=123.0,left=Channel(gainDb=-6.0))
+            vm.update {it.copy(processing=p,a=p,b=p.copy(phaseDeg=-90.0))}
+            vm.confirmMapping(false)
+        }
+        val backup=vm.session
+        rule.runOnIdle {vm.startAuto()}
+        rule.waitUntil(10000) {!vm.autoBusy}
+        assertEquals(AutoStage.REJECTED,vm.autoProgress.stage)
+        assertEquals(backup,vm.session)
+        assertTrue(vm.autoDiagnostic.contains("REJECTED"))
+        rule.runOnIdle {vm.confirmMapping(false);vm.startAuto();vm.stop()}
+        rule.waitUntil(10000) {!vm.autoBusy}
+        // Permission rejection may win the race with Stop; either terminal state must release ownership.
+        assertTrue(vm.autoProgress.stage in listOf(AutoStage.CANCELLED,AutoStage.REJECTED))
+        assertEquals(backup,vm.session)
+        assertFalse(vm.audio.playing)
+        assertEquals(0,Thread.getAllStackTraces().keys.count {it.name.startsWith("AutoFIR-")})
+    }
     @Test fun responsiveScreensKeepStopVisible() {
         init()
         try {
@@ -37,9 +58,13 @@ class AppTest {
                 Thread.sleep(1500) // Window manager rotation/resize animation is outside Compose idling.
                 rule.waitForIdle()
                 Log.i("SpeakerArrayValidation","requested ${width}x${height}dp, actual ${rule.activity.resources.configuration.screenWidthDp}x${rule.activity.resources.configuration.screenHeightDp}dp, density=${rule.activity.resources.displayMetrics.density}")
-                for(tab in listOf("再生・調整","FIR編集","理論プレビュー")) {
-                    rule.onNodeWithText(tab).performClick()
+                for(tab in listOf("再生・調整","FIR編集","理論プレビュー","フィルタ自動設計")) {
+                    rule.onNodeWithText(tab).performScrollTo().performClick()
                     rule.onNodeWithContentDescription("常設の停止").assertIsDisplayed()
+                    if(tab=="フィルタ自動設計") {
+                        rule.onNodeWithText("測定・設計・適用").assertIsDisplayed()
+                        rule.onNodeWithText("取消").assertIsDisplayed()
+                    }
                     Thread.sleep(350)
                     val bitmap=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
                     val folder=File(rule.activity.getExternalFilesDir(null),"screenshots").apply {mkdirs()}

@@ -80,18 +80,19 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=8.dp), verticalAlignment=Alignment.CenterVertically) {
                     Text("SpeakerArray", fontSize=18.sp, modifier=Modifier.padding(end=12.dp))
-                    listOf("再生・調整","FIR編集","理論プレビュー").forEachIndexed { i, name ->
+                    listOf("再生・調整","FIR編集","理論プレビュー","フィルタ自動設計").forEachIndexed { i, name ->
                         TextButton(onClick={vm.tab=i}) { Text(name,color=if(vm.tab==i) LeftBlue else Color.LightGray) }
                     }
-                    TextButton(onClick={export(false)}) { Text("設定保存") }
-                    TextButton(onClick={fileAction="session";open.launch(arrayOf("application/json","text/*","application/octet-stream"))}) { Text("設定読込") }
+                    TextButton(onClick={export(false)},enabled=!vm.autoBusy) { Text("設定保存") }
+                    TextButton(onClick={fileAction="session";open.launch(arrayOf("application/json","text/*","application/octet-stream"))},enabled=!vm.autoBusy) { Text("設定読込") }
                 }
                 HorizontalDivider()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    when(vm.tab) {
+                    when(if(vm.autoBusy) 3 else vm.tab) {
                         0 -> Playback(vm, {mapping=true}, {fileAction="wav";open.launch(arrayOf("audio/*","application/octet-stream"))})
                         1 -> FirEditor(vm, {fileAction="fir";open.launch(arrayOf("application/json","text/*","application/octet-stream"))}, {export(true)})
-                        else -> Theory(vm)
+                        2 -> Theory(vm)
+                        else -> AutoFirPage(vm) {text->exportText=text;save.launch("SpeakerArray-measurement.json")}
                     }
                 }
                 HorizontalDivider()
@@ -158,12 +159,13 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
 @Composable fun Footer(vm: AppViewModel) {
     val status=vm.audio
     Row(Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically) {
-        Button(onClick=vm::start,enabled=!vm.loading,modifier=Modifier.heightIn(min=52.dp)) {Text("再生")}
+        Button(onClick=vm::start,enabled=!vm.loading && !vm.autoBusy,modifier=Modifier.heightIn(min=52.dp)) {Text("再生")}
         Spacer(Modifier.width(6.dp))
         Button(onClick=vm::stop,modifier=Modifier.heightIn(min=52.dp).semantics {contentDescription="常設の停止"},colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFB33F42))) {Text("停止")}
         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically) {
             Column(Modifier.width(240.dp)) {
-                NumberControl("共通出力",vm.session.masterDb,"dB",-60.0..0.0,vm::stop,slider=false,step=0.1) {v ->vm.update {it.copy(masterDb=v)}}
+                if(vm.autoBusy) Text("測定レベル ${fmt(vm.session.masterDb)} dB（固定）")
+                else NumberControl("共通出力",vm.session.masterDb,"dB",-60.0..0.0,vm::stop,slider=false,step=0.1) {v ->vm.update {it.copy(masterDb=v)}}
                 Text("左 ${fmt(status.leftDb)} / 右 ${fmt(status.rightDb)} dBFS",fontFamily=FontFamily.Monospace,fontSize=12.sp)
             }
             Column(Modifier.widthIn(min=180.dp,max=340.dp)) {
@@ -183,6 +185,11 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
             Text(if(right) "右音源" else "左音源",color=color,fontSize=20.sp)
             Text("音声ch ${if(right xor vm.session.swapped) "R" else "L"}",fontSize=12.sp)
             NumberControl("ゲイン",c.gainDb,"dB",-60.0..12.0,vm::stop,step=0.1) {v -> vm.channel(right) {it.copy(gainDb=v)}}
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) {
+                listOf(0,-3,-6).forEach {db ->
+                    OutlinedButton(onClick={vm.channel(right) {it.copy(gainDb=db.toDouble())}}) {Text("$db dB")}
+                }
+            }
             Toggle("ミュート",c.muted) {v ->vm.channel(right) {it.copy(muted=v)}}
             OutlinedButton(onClick={vm.solo(right)}) {Text("この側だけ／解除")}
             Toggle("極性反転",c.inverted) {v ->vm.channel(right) {it.copy(inverted=v)}}
@@ -220,7 +227,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
         } }
         if(src.kind==SourceKind.SINE) {
             NumberControl("右の位相 − 左の位相",p.phaseDeg,"°",-180.0..180.0,vm::stop,digits=0,step=1.0) {v ->vm.processing {it.copy(phaseDeg=v)}}
-            FlowRow {listOf(0,90,180).forEach {v ->OutlinedButton(onClick={vm.processing {it.copy(phaseDeg=v.toDouble())}}) {Text("$v°")}}}
+            FlowRow {listOf(-90,0,90,180).forEach {v ->OutlinedButton(onClick={vm.processing {it.copy(phaseDeg=v.toDouble())}}) {Text("$v°")}}}
             NumberControl("周波数",src.frequency,"Hz",20.0..20000.0,vm::stop,slider=false,digits=0,step=1.0) {v ->vm.source {it.copy(frequency=v)}}
             Row(Modifier.horizontalScroll(rememberScrollState())) {listOf(250,500,1000,1143,2000,4000).forEach {hz ->TextButton(onClick={vm.source {it.copy(frequency=hz.toDouble())}}) {Text("$hz Hz")}}}
             Text("発振器 ${fmt(p.phaseDeg,0)}° / 処理全体 ${fmt(vm.totalPhase)}°",fontSize=12.sp)
@@ -369,15 +376,19 @@ fun firName(m: FirMode) = when(m) {FirMode.FLAT->"フラット";FirMode.EQ->"グ
         FlowRow {
             NumberControl("音源間隔",vm.session.spacingMm,"mm",0.0..3000.0,vm::stop,slider=false) {v->vm.update {it.copy(spacingMm=v)}}
             NumberControl("音速",vm.session.soundSpeed,"m/s",250.0..400.0,vm::stop,slider=false) {v->vm.update {it.copy(soundSpeed=v)}}
-            NumberControl("評価周波数",vm.session.evaluationHz,"Hz",20.0..20000.0,vm::stop,slider=false) {v->vm.update {it.copy(evaluationHz=v)}}
+            if (vm.session.source.kind == SourceKind.SINE) {
+                Text("評価周波数: ${fmt(vm.session.previewFrequencyHz,0)} Hz（再生周波数に自動追従）",modifier=Modifier.padding(8.dp))
+            } else {
+                NumberControl("評価周波数",vm.session.evaluationHz,"Hz",20.0..20000.0,vm::stop,slider=false) {v->vm.update {it.copy(evaluationHz=v)}}
+            }
         }
         Chart(vm.pattern,null,null,-60.0,max(0.0,vm.pattern.maxOrNull() ?: 0.0),"−90° 左  ·  −45°  ·  0° 正面  ·  +45°  ·  +90° 右","相対dB")
         Text("固定参照: 0 dBゲインの2音源が同相加算した振幅2。共通出力ゲインを除外し、最大値では正規化しません。",fontSize=13.sp)
-        Text("${sourceName(vm.session.source.kind)} / ${fmt(vm.session.evaluationHz,0)} Hz。${if(vm.session.source.kind==SourceKind.SINE) "発振器の相対位相を含みます。" else "正弦波用の位相設定を含みません。"}",fontSize=13.sp)
+        Text("${sourceName(vm.session.source.kind)} / ${fmt(vm.session.previewFrequencyHz,0)} Hz。${if(vm.session.source.kind==SourceKind.SINE) "発振器の相対位相を含みます。" else "正弦波用の位相設定を含みません。"}",fontSize=13.sp)
     }
 }
 
-@Composable private fun Chart(values: DoubleArray, other: DoubleArray?, target: DoubleArray?, low: Double?, high: Double?, axis: String, unit: String,
+@Composable internal fun Chart(values: DoubleArray, other: DoubleArray?, target: DoubleArray?, low: Double?, high: Double?, axis: String, unit: String,
     points: List<Double>? = null, onPoint: (Int,Double) -> Unit = {_,_->}) {
     val finite=(values.asSequence()+(other?.asSequence() ?: emptySequence())).filter {it.isFinite()}.toList()
     val minY=min(low ?: (finite.minOrNull() ?: -1.0), finite.minOrNull()?.coerceAtLeast(if(low!=null) low else -1e12) ?: -1.0)

@@ -11,12 +11,13 @@ object SessionRepository {
     private fun readSpec(o: JSONObject) = FirSpec(FirMode.valueOf(o.getString("mode")), o.getJSONArray("eq").doubles(), o.getDouble("low"), o.getDouble("high"), o.getJSONArray("coefficients").doubles())
     private fun channel(c: Channel) = obj("gainDb" to c.gainDb, "muted" to c.muted, "inverted" to c.inverted, "enabled" to c.enabled, "fir" to firObject(c.fir))
     private fun readChannel(o: JSONObject) = Channel(o.getDouble("gainDb"), o.getBoolean("muted"), o.getBoolean("inverted"), o.getBoolean("enabled"), readSpec(o.getJSONObject("fir")))
-    private fun processing(p: Processing) = obj("length" to p.length, "left" to channel(p.left), "right" to channel(p.right), "delayUs" to p.delayUs, "phaseDeg" to p.phaseDeg)
-    private fun readProcessing(o: JSONObject) = Processing(o.getInt("length"), readChannel(o.getJSONObject("left")), readChannel(o.getJSONObject("right")), o.getDouble("delayUs"), o.getDouble("phaseDeg")).also { it.validate() }
+    internal fun processing(p: Processing) = obj("length" to p.length, "left" to channel(p.left), "right" to channel(p.right), "delayUs" to p.delayUs, "phaseDeg" to p.phaseDeg)
+    internal fun readProcessing(o: JSONObject) = Processing(o.getInt("length"), readChannel(o.getJSONObject("left")), readChannel(o.getJSONObject("right")), o.getDouble("delayUs"), o.getDouble("phaseDeg")).also { it.validate() }
     fun encode(s: Session): String {
         s.validate()
         val src = s.source
-        return obj("type" to "speakerarray-session", "schemaVersion" to 1, "sampleRateHz" to SAMPLE_RATE,
+        return obj("type" to "speakerarray-session", "schemaVersion" to 2, "sampleRateHz" to SAMPLE_RATE,
+            "autoFir" to CalibrationRepository.settings(s.autoFir), "calibration" to s.calibration?.let {CalibrationRepository.profile(it)},
             "processing" to processing(s.processing), "masterDb" to s.masterDb, "swapped" to s.swapped,
             "reverseLandscape" to s.reverseLandscape, "orientationChosen" to s.orientationChosen,
             "spacingMm" to s.spacingMm, "soundSpeed" to s.soundSpeed, "evaluationHz" to s.evaluationHz,
@@ -27,7 +28,7 @@ object SessionRepository {
     }
     private fun header(o: JSONObject, type: String) {
         require(o.getString("type") == type) { "ファイル種別が違います（$type が必要です）" }
-        require(o.getDouble("schemaVersion") == 1.0) { "未対応のschemaVersionです" }
+        require(o.getDouble("schemaVersion") in (if(type=="speakerarray-session") listOf(1.0,2.0) else listOf(1.0))) { "未対応のschemaVersionです" }
         require(o.getDouble("sampleRateHz") == SAMPLE_RATE.toDouble()) { "48 kHzの設定のみ対応します。FIRを再設計してください" }
     }
     fun decode(text: String): Session {
@@ -40,7 +41,9 @@ object SessionRepository {
                 v.getBoolean("loop"), v.getString("wavUri"), MonoMode.valueOf(v.getString("mono")), v.getBoolean("loopFade")),
             o.getDouble("masterDb"), o.getBoolean("swapped"), o.getBoolean("reverseLandscape"), o.getBoolean("orientationChosen"),
             o.getDouble("spacingMm"), o.getDouble("soundSpeed"), o.getDouble("evaluationHz"),
-            if (o.isNull("a")) null else readProcessing(o.getJSONObject("a")), if (o.isNull("b")) null else readProcessing(o.getJSONObject("b"))).also { it.validate() }
+            if (o.isNull("a")) null else readProcessing(o.getJSONObject("a")), if (o.isNull("b")) null else readProcessing(o.getJSONObject("b")),
+            o.optJSONObject("autoFir")?.let {CalibrationRepository.readSettings(it)} ?: AutoFirSettings(),
+            o.optJSONObject("calibration")?.let {CalibrationRepository.readProfile(it)}).also { it.validate() }
     }
     fun exportFir(spec: FirSpec, length: Int): String = obj("type" to "speakerarray-fir", "schemaVersion" to 1,
         "sampleRateHz" to SAMPLE_RATE, "coefficients" to numbers(FirDesigner.design(spec, length).toList()), "design" to firObject(spec)).toString(2)

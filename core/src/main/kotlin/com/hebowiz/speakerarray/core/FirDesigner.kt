@@ -120,7 +120,7 @@ object ResponseAnalyzer {
             Complex.polar(if (sine && right) p.phaseDeg*PI/180 else 0.0) * dbGain(ch.gainDb) * (if (ch.inverted) -1.0 else 1.0)
     }
     fun pattern(session: Session): DoubleArray {
-        val f = session.evaluationHz
+        val f = session.previewFrequencyHz
         val l = channel(session.processing, false, f, session.source.kind == SourceKind.SINE)
         val r = channel(session.processing, true, f, session.source.kind == SourceKind.SINE)
         return DoubleArray(181) { i ->

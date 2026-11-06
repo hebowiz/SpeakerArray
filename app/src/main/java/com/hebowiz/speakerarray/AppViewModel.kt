@@ -3,12 +3,14 @@ package com.hebowiz.speakerarray
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.media.AudioDeviceInfo
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hebowiz.speakerarray.core.*
 import kotlinx.coroutines.*
 import java.io.File
+import org.json.JSONObject
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("session", 0)
@@ -30,6 +32,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var designing by mutableStateOf(false); private set
     var loading by mutableStateOf(false); private set
     var generation by mutableLongStateOf(0); private set
+    var autoBusy by mutableStateOf(false); private set
+    var autoProgress by mutableStateOf(AutoProgress()); private set
+    var measurementRoute by mutableStateOf(MeasurementRouteState()); private set
+    var autoResult by mutableStateOf<AutoMeasurementResult?>(null); private set
+    var autoDiagnostic by mutableStateOf(""); private set
+    var routeRevision by mutableIntStateOf(0); private set
+    var maintainingRoute by mutableStateOf(false); private set
+    var systemVolume by mutableIntStateOf(0); private set
+    private var measurementDeviceIds: Pair<Int,Int>?=null
+    val routes = DeviceRoutes(app) { devicesChanged() }
+    private fun devicesChanged() {
+        routeRevision++; needsMapping=true
+        measurementDeviceIds?.let {(output,input)->
+            if(autoBusy && (routes.devices(false).none {it.id==output} || routes.devices(true).none {it.id==input})) cancelAuto("選択したデバイスが切断されました")
+        }
+    }
+    private var autoJob: Job? = null
+    private var heldAudio: MeasurementAudio? = null
+    private var holdJob: Job? = null
+    private var releaseJob: Job? = null
+    private var autoEpoch = System.currentTimeMillis()
+    private var autoBackup: Session? = null
     private var prepared: PreparedProcessing? = null
     private var prepareJob: Job? = null
     private var draftJob: Job? = null
@@ -55,6 +79,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (changed) { generations.keys.removeAll { it < status.generation }; preview() }
     }
     init {
+        autoDiagnostic=prefs.getString("autoDiagnostic","") ?: ""
+        runCatching {
+            if(autoDiagnostic.isNotEmpty()) {
+                val diagnostic=JSONObject(autoDiagnostic)
+                autoProgress=AutoProgress(AutoStage.valueOf(diagnostic.getString("stage")),detail=diagnostic.getString("detail"))
+            }
+        }
         prefs.getString("last", null)?.let { raw -> runCatching { SessionRepository.decode(raw) }.onSuccess { session = it }.onFailure { message = "保存設定を復元できません: ${it.message}" } }
         draft = channel().fir
         scheduleProcessing(); previewDraft()
@@ -64,6 +95,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun dismissMessage() { message = "" }
     fun channel() = if (sideRight) session.processing.right else session.processing.left
     fun update(change: (Session) -> Session) {
+        if(autoBusy) return
         try {
             val next = change(session); next.validate()
             val old = session
@@ -75,6 +107,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun processing(change: (Processing) -> Processing) = update { it.copy(processing=change(it.processing)) }
     fun channel(right: Boolean, change: (Channel) -> Channel) = processing { if (right) it.copy(right=change(it.right)) else it.copy(left=change(it.left)) }
     fun source(change: (SourceSettings) -> SourceSettings) {
+        if(autoBusy) return
         val old = session.source
         val next = change(old)
         runCatching { next.validate() }.onFailure { notify(it.message ?: "音源設定が不正です"); return }
@@ -86,12 +119,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(source=next) }
     }
     fun start() {
+        if(autoBusy) return
+        if(releaseJob?.isActive==true) {message="通信経路の解放完了までお待ちください";return}
+        try {
+            val profile=session.calibration
+            if(profile?.hfp==true && session.processing==profile.applied) {
+                check(maintainingRoute) { "HFP校正時のMIC・通信経路が解除されています。再測定または元に戻す操作が必要です" }
+                heldAudio?.check()
+            }
+            engine.requestedOutput=routes.resolve(session.autoFir.output,false)
+        } catch(e: Exception) {message=e.message ?: "出力先を選択してください";return}
         if (loading || prepared?.generation != generation) { message = "設定の準備が完了するまでお待ちください"; return }
         if (session.source.kind == SourceKind.WAV && wavFile == null) { message = "WAVを選択してください"; return }
         engine.settings = session; engine.start(prepared!!, wavFile)
     }
-    fun stop() { engine.stop() }
-    fun background() { engine.stop("バックグラウンド移行・停止"); persist() }
+    fun stop() { engine.stop(); if(autoBusy) cancelAuto("停止操作") }
+    fun background() { cancelAuto("バックグラウンド移行"); releaseHeldRoute(); engine.stop("バックグラウンド移行・停止"); persist() }
     fun solo(right: Boolean) {
         if (soloSaved != null && soloSide == right) {
             val (l,r) = soloSaved!!; soloSaved = null
@@ -108,6 +151,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun selectSide(right: Boolean) { sideRight = right; draftJob?.cancel(); draft = channel().fir; firPending = false; previewDraft(); preview() }
     fun automatic(enabled: Boolean) { autoApply = enabled; previewDraft() }
     fun editFir(change: (FirSpec) -> FirSpec) {
+        if(autoBusy) return
         draft = change(draft); firPending = true; previewDraft()
     }
     private fun previewDraft() {
@@ -187,6 +231,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         saveJob = viewModelScope.launch(Dispatchers.IO) { delay(250); prefs.edit().putString("last",SessionRepository.encode(snapshot)).apply() }
     }
     fun loadSession(text: String) {
+        if(autoBusy) return
         try {
             val s = SessionRepository.decode(text)
             wavJob?.cancel(); wavGeneration++; loading = false
@@ -204,6 +249,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         catch (e: Exception) { message = "係数が不正です: ${e.message}" }
     }
     fun loadWav(uri: Uri, persistPermission: Boolean = true, mono: MonoMode = session.source.mono) {
+        if(autoBusy) return
         stop(); wavJob?.cancel(); loading = true
         val request = ++wavGeneration
         val key = "$uri/$mono"
@@ -236,5 +282,104 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             finally { if (request == wavGeneration) loading = false }
         }
     }
-    override fun onCleared() { engine.stop(); super.onCleared() }
+    fun autoSettings(change: (AutoFirSettings)->AutoFirSettings) {
+        if(autoBusy) return
+        stop();releaseHeldRoute()
+        val before=session.autoFir
+        update {it.copy(autoFir=change(it.autoFir))}
+        if(before.output!=session.autoFir.output || before.input!=session.autoFir.input) needsMapping=true
+    }
+    fun cancelAuto(reason: String="取消") {
+        if(autoBusy) {autoProgress=autoProgress.copy(detail=reason);autoJob?.cancel(CancellationException(reason))}
+    }
+    fun releaseHeldRoute() {
+        holdJob?.cancel();holdJob=null
+        val held=heldAudio;heldAudio=null;maintainingRoute=false
+        if(held!=null) releaseJob=viewModelScope.launch(NonCancellable+Dispatchers.IO) {held.close()}
+    }
+    fun undoAuto() {
+        if(autoBusy) return
+        val backup=autoBackup ?: session.calibration?.let {runCatching {SessionRepository.decode(it.backup)}.getOrNull()} ?: return
+        stop();releaseHeldRoute();update {backup};selectSide(sideRight);autoBackup=null
+        autoProgress=AutoProgress(AutoStage.IDLE,detail="元のFIR・FIR長・A/B・音源・音量・ルートを復元しました")
+    }
+    fun startAuto() {
+        if(autoBusy || loading) return
+        if(needsMapping) {message="測定前に「再生・調整」の「左右の確認」を行ってください";return}
+        val backup=session
+        val output: AudioDeviceInfo;val input: AudioDeviceInfo
+        try {backup.autoFir.validate();output=routes.resolve(backup.autoFir.output,false);input=routes.resolve(backup.autoFir.input,true)}
+        catch(e: Exception) {message=e.message ?: "デバイス未確認";return}
+        releaseHeldRoute();engine.stop();autoBusy=true;autoResult=null;autoDiagnostic=""
+        measurementDeviceIds=output.id to input.id
+        val id=++autoEpoch
+        val transaction=CalibrationTransaction(backup,id)
+        val resolved=backup.autoFir.copy(output=output.key(),input=input.key())
+        autoJob=viewModelScope.launch(start=CoroutineStart.UNDISPATCHED) {
+            var measurement: AutoFirMeasurement?=null
+            var retained=false
+            try {
+                releaseJob?.join()
+                withTimeout(5000) {while(engine.isRunning) delay(20)}
+                prepareJob?.cancelAndJoin();draftJob?.cancelAndJoin()
+                measurement=AutoFirMeasurement(getApplication(),output,input,resolved,backup,
+                    {p->viewModelScope.launch {if(autoEpoch==id && autoBusy) autoProgress=p}},
+                    {r->viewModelScope.launch {if(autoEpoch==id) measurementRoute=r}})
+                val runner=measurement
+                val result=withContext(Dispatchers.Default) {runner.run()}
+                ensureActive();check(autoEpoch==id)
+                val resultJson=withContext(Dispatchers.Default) {MeasurementResultStore.encode(result,id)}
+                val profile=CalibrationProfile(id,resolved,backup.masterDb,backup.swapped,result.volume,result.mode,
+                    input.type==AudioDeviceInfo.TYPE_BLUETOOTH_SCO,result.solution.processing,
+                    SessionRepository.encode(backup.copy(calibration=null)),resultJson)
+                val next=transaction.accept(profile,result.verification)
+                next.validate()
+                val ready=withContext(Dispatchers.Default) {PreparedProcessing.create(next.processing,generation+1)}
+                ensureActive();runner.audio.check()
+                if(profile.hfp) runner.audio.retain()
+                // Publish one accepted generation atomically. Trial processing never mutates session.
+                generation=ready.generation;prepared=ready;audibleProcessing=next.processing
+                session=next;engine.settings=next;autoBackup=backup;autoResult=result;systemVolume=result.volume
+                draft=channel().fir;firPending=false;preview();previewDraft();persist()
+                autoProgress=AutoProgress(AutoStage.APPLIED,1f,if(result.verification.any {it.noiseLimited}) "測定限界を含みます。低減量はノイズ床で制限されています" else "有効帯域で効果確認済み・停止中")
+                if(profile.hfp) {
+                    heldAudio=runner.audio;maintainingRoute=true;retained=true
+                    holdJob=viewModelScope.launch {
+                        try {while(true) {delay(250);runner.audio.check();systemVolume=runner.audio.volumeIndex}}
+                        catch(e: CancellationException) {throw e}
+                        catch(e: Exception) {engine.stop();releaseHeldRoute();autoProgress=autoProgress.copy(detail="測定条件と異なる: ${e.message}")}
+                    }
+                }
+            } catch(e: CancellationException) {transaction.rollback();autoProgress=AutoProgress(AutoStage.CANCELLED,detail=e.message ?: "取消")}
+            catch(e: Exception) {transaction.rollback();autoProgress=AutoProgress(AutoStage.REJECTED,detail=e.message ?: "測定失敗")}
+            finally {
+                withContext(NonCancellable) {
+                try {
+                if(autoEpoch==id) {
+                    autoDiagnostic=JSONObject().put("type","speakerarray-diagnostic").put("schemaVersion",1)
+                        .put("generation",id).put("stage",autoProgress.stage.name).put("detail",autoProgress.detail)
+                        .put("requested",measurementRoute.requested).put("actual",measurementRoute.actual)
+                        .put("pcm",measurementRoute.pcm).put("effects",measurementRoute.effects)
+                        .put("recordedFrames",measurementRoute.frames).put("clips",measurementRoute.clips)
+                        .put("settings",CalibrationRepository.settings(resolved)).put("masterDb",backup.masterDb)
+                        .put("measurements",measurement?.diagnostics ?: JSONObject()).toString(2)
+                    val savedDiagnostic=autoDiagnostic
+                    withContext(Dispatchers.IO) {prefs.edit().putString("autoDiagnostic",savedDiagnostic).apply()}
+                }
+                } finally {
+                withContext(Dispatchers.IO) {if(!retained) measurement?.audio?.close()}
+                if(autoEpoch==id) {autoBusy=false;autoJob=null;measurementDeviceIds=null;if(autoProgress.stage!=AutoStage.APPLIED) {scheduleProcessing();previewDraft()}}
+                }
+                }
+            }
+        }
+    }
+    fun calibrationStatus(): String {
+        val p=session.calibration ?: return "校正結果なし"
+        val volume=routes.manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        return if(!p.matches(session,volume) || (p.hfp && !maintainingRoute)) "測定条件と異なる・校正条件を確認してください" else "保存した測定条件と一致"
+    }
+    fun exportAutoResult(): String = if(autoProgress.stage==AutoStage.APPLIED && session.calibration!=null)
+        CalibrationRepository.profile(session.calibration!!).toString(2) else autoDiagnostic
+    override fun onCleared() { autoJob?.cancel();heldAudio?.close();routes.close();engine.stop(); super.onCleared() }
 }

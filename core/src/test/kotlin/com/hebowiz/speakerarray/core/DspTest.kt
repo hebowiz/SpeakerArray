@@ -77,6 +77,24 @@ class DspTest {
         assertEquals(6.0,ResponseAnalyzer.pattern(boosted)[90],1e-8)
         assertArrayEquals(ResponseAnalyzer.pattern(boosted),ResponseAnalyzer.pattern(boosted.copy(masterDb=-60.0)),0.0)
     }
+    @Test fun theoryFollowsSineFrequencyIncludingRestoredSessions() {
+        val original = Session(source=SourceSettings(frequency=500.0),evaluationHz=7000.0)
+        for (frequency in listOf(500.0,1000.0,4000.0)) {
+            val session = SessionRepository.decode(SessionRepository.encode(original.copy(source=original.source.copy(frequency=frequency))))
+            val pattern = ResponseAnalyzer.pattern(session)
+            val expected = max(-60.0,levelDb(cos(PI*frequency*0.15*sin(30*PI/180)/343)))
+            assertEquals(frequency,session.previewFrequencyHz,0.0)
+            assertEquals(expected,pattern[120],1e-8)
+        }
+    }
+    @Test fun broadbandTheoryKeepsManualEvaluationFrequency() {
+        for (kind in listOf(SourceKind.WHITE,SourceKind.PINK,SourceKind.SWEEP,SourceKind.WAV)) {
+            val session = Session(source=SourceSettings(kind=kind,frequency=4000.0),evaluationHz=500.0)
+            assertEquals(500.0,session.previewFrequencyHz,0.0)
+            val expected = max(-60.0,levelDb(cos(PI*500*0.15*sin(30*PI/180)/343)))
+            assertEquals(expected,ResponseAnalyzer.pattern(session)[120],1e-8)
+        }
+    }
     @Test fun rightDelaySteersTowardPositiveAngle() {
         val delay=0.15*sin(30*PI/180)/343*1e6
         val s=Session(processing=Processing(delayUs=delay),source=SourceSettings(kind=SourceKind.WHITE),evaluationHz=1000.0)

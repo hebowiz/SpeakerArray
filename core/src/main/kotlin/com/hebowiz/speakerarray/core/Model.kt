@@ -21,7 +21,11 @@ data class SourceSettings(val kind: SourceKind = SourceKind.SINE, val frequency:
 data class Session(val processing: Processing = Processing(), val source: SourceSettings = SourceSettings(),
     val masterDb: Double = -24.0, val swapped: Boolean = false, val reverseLandscape: Boolean = false,
     val orientationChosen: Boolean = false, val spacingMm: Double = 150.0, val soundSpeed: Double = 343.0,
-    val evaluationHz: Double = 1143.0, val a: Processing? = null, val b: Processing? = null)
+    val evaluationHz: Double = 1143.0, val a: Processing? = null, val b: Processing? = null,
+    val autoFir: AutoFirSettings = AutoFirSettings(), val calibration: CalibrationProfile? = null) {
+    val previewFrequencyHz: Double
+        get() = if (source.kind == SourceKind.SINE) source.frequency else evaluationHz
+}
 
 fun finiteRange(value: Double, low: Double, high: Double, label: String) {
     require(value.isFinite() && value in low..high) { "$label は $low ～ $high の有限値で指定してください" }
@@ -36,6 +40,7 @@ fun Processing.validate() {
     }
 }
 fun Session.validate() {
+    autoFir.validate()
     processing.validate()
     finiteRange(masterDb, -60.0, 0.0, "共通出力 dB")
     finiteRange(spacingMm, 0.0, 3000.0, "音源間隔 mm")

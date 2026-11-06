@@ -27,6 +27,8 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     @Volatile private var dsp: DspEngine? = null
     @Volatile private var wav: WavSource? = null
     @Volatile var settings = Session()
+    @Volatile var requestedOutput: AudioDeviceInfo? = null
+    val isRunning get() = worker != null
     private var routeId: Int? = null
     private var routeName = "出力先を確認中"
     fun submit(p: PreparedProcessing) { dsp?.submit(p) }
@@ -64,11 +66,24 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).build())
                 .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(max(minimum*4, BLOCK*8*8)).build()
             check(track.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack初期化失敗" }
+            val requested = requireNotNull(requestedOutput) { "出力デバイス未選択" }
+            check(track.setPreferredDevice(requested)) { "出力デバイス要求が拒否されました" }
+            routeId = null
             track.addOnRoutingChangedListener(routing, main)
+            track.play()
+            val routingDeadline = System.nanoTime()+5_000_000_000L
+            val silence = FloatArray(BLOCK*2)
+            while (track.routedDevice?.id != requested.id) {
+                check(!stopRequested) { reason }
+                check(System.nanoTime()<routingDeadline) { "要求した出力先を確認できません" }
+                StereoWriter.writeAll(silence) { a,o,n -> track.write(a,o,n,AudioTrack.WRITE_BLOCKING) }
+            }
+            routeId=requested.id;routeName=requested.description()
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             var gain = 0.0; var started = false; var lastReport = 0L; var worstCpu = 0.0
             var peakL = 0.0; var peakR = 0.0
             while (!stopRequested || gain > 0.0) {
+                check(track.routedDevice?.id==requested.id) { "出力先不一致・停止" }
                 val begin = System.nanoTime()
                 val s = settings
                 source.render(left, right, s.source.frequency, s.processing.phaseDeg)
