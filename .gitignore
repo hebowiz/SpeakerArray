@@ -1,0 +1,38 @@
+# Gradle and Kotlin caches
+.gradle/
+.kotlin/
+
+# Build output (all modules)
+build/
+out/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Machine-specific Android SDK and IDE settings
+local.properties
+.idea/
+*.iml
+*.hprof
+
+# Signing credentials and local secrets
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+secrets.properties
+.env
+.env.*
+!.env.example
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Gradle wrapper files, including gradle-wrapper.jar, must be committed.
