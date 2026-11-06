@@ -28,13 +28,14 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     @Volatile private var wav: WavSource? = null
     @Volatile var settings = Session()
     @Volatile var requestedOutput: AudioDeviceInfo? = null
-    val isRunning get() = worker != null
+    @Volatile private var retainedActive=false
+    val isRunning get() = worker != null || retainedActive
     private var routeId: Int? = null
     private var routeName = "出力先を確認中"
     fun submit(p: PreparedProcessing) { dsp?.submit(p) }
     fun seek(fraction: Double) { wav?.seek(fraction) }
     fun start(prepared: PreparedProcessing, wavFile: File?) {
-        if (worker != null) return
+        if (isRunning) return
         if (manager.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             report(AudioStatus(message="音声フォーカスを取得できません")); return
         }
@@ -45,6 +46,52 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
         worker = Thread({ run(initial, engine, wavFile) }, "SpeakerArray-audio").also { it.start() }
     }
     fun stop(message: String = "停止") { reason = message; stopRequested = true }
+    /** Use the exact measured AudioTrack, attributes and communication lease; no track migration. */
+    fun startRetained(prepared: PreparedProcessing, wavFile: File?, port: MeasurementAudio) {
+        if(isRunning) return
+        port.check()
+        val initial=settings;val profile=requireNotNull(initial.calibration)
+        check(CalibrationPlaybackPolicy.matches(profile,initial,port.volumeIndex,port.mode,true)) {"校正条件が一致しません"}
+        check(prepared.parameters==profile.applied) {"検証済み係数と再生係数が異なります"}
+        check(manager.requestAudioFocus(focus)==AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {"音声フォーカスを取得できません"}
+        val fileSource=if(initial.source.kind==SourceKind.WAV) WavSource(requireNotNull(wavFile),initial.source.loop,initial.source.loopFade) else null
+        val source=SourceEngine(initial.source,fileSource)
+        val engine=DspEngine(prepared);dsp=engine;wav=fileSource
+        val l=DoubleArray(BLOCK);val r=DoubleArray(BLOCK)
+        var gain=0.0;var lastReport=0L
+        stopRequested=false;reason="停止";retainedActive=true
+        fun finish(detail: String) {
+            port.endPlayback();fileSource?.close();wav=null;dsp=null;retainedActive=false
+            manager.abandonAudioFocusRequest(focus)
+            main.post {report(AudioStatus(generation=prepared.generation,message=detail,route="測定と同一の出力ストリーム（停止中）"))}
+        }
+        try {
+            port.beginPlayback({out ->
+                check(settings.processing==profile.applied && settings.masterDb==profile.masterDb && settings.swapped==profile.swapped) {"校正処理が変更されました"}
+                port.check()
+                if(stopRequested && gain<=0) {finish(reason);false} else {
+                    source.render(l,r,settings.source.frequency,0.0)
+                    check(fileSource?.error==null) {"WAV読込エラー"}
+                    check((l.asSequence()+r.asSequence()).all {it.isFinite() && abs(it)<=1.0}) {"音源ピークが検証範囲を超えました"}
+                    engine.process(l,r,out,initial.masterDb,initial.swapped)
+                    check(engine.clips==0L) {"再生ピーク上限を超えました"}
+                    for(i in 0 until BLOCK) {
+                        gain=(gain+(if(stopRequested) -1 else 1)/480.0).coerceIn(0.0,1.0)
+                        out[2*i]=(out[2*i]*gain).toFloat();out[2*i+1]=(out[2*i+1]*gain).toFloat()
+                    }
+                    if(source.finished) stop("音源終了・停止")
+                    if(System.nanoTime()-lastReport>100_000_000L) {
+                        lastReport=System.nanoTime()
+                        val status=AudioStatus(playing=true,generation=prepared.generation,
+                            leftDb=levelDb(l.maxOf {abs(it)}),rightDb=levelDb(r.maxOf {abs(it)}),
+                            route=port.state().actual,message="検証と同一ストリームで再生（任意音源の効果は未評価）")
+                        main.post {report(status)}
+                    }
+                    true
+                }
+            },{finish("停止: $it")})
+        } catch(e: Exception) {finish("停止: ${e.message}");throw e}
+    }
     private fun run(initial: Session, engine: DspEngine, wavFile: File?) {
         var track: AudioTrack? = null
         var finalMessage: String

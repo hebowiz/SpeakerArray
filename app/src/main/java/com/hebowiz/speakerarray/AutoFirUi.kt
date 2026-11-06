@@ -38,6 +38,7 @@ import kotlin.math.*
     val inputs=remember(vm.routeRevision,permissionsRevision) {vm.routes.devices(true)}
     val outputs=remember(vm.routeRevision,permissionsRevision) {vm.routes.devices(false)}
     val s=vm.session.autoFir;val busy=vm.autoBusy
+    val diagnostic=remember(vm.analysisJson) {runCatching {org.json.JSONObject(vm.analysisJson)}.getOrNull()}
     var advanced by remember {mutableStateOf(false)}
     Column(Modifier.fillMaxSize().padding(horizontal=8.dp)) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -52,6 +53,7 @@ import kotlin.math.*
         val actualInput=if(live) vm.measurementRoute.actual.substringAfter(" / MIC ","未確認") else "未確認（停止中）"
         Text("出力: 要求 ${s.output?.let {"${it.name} / type=${it.type}"} ?: "自動（内蔵）"} → 実 $actualOutput",fontSize=11.sp,maxLines=2)
         Text("MIC: 要求 ${s.input?.let {"${it.name} / type=${it.type}"} ?: "自動（内蔵）"} → 実 $actualInput",fontSize=11.sp,maxLines=2)
+        if(vm.maintainingRoute) Text("MIC・測定出力・通信条件を維持中 / 停止・解放は結果欄",color=RightOrange,fontSize=11.sp)
         BoxWithConstraints(Modifier.weight(1f)) {
             val controls: @Composable ()->Unit = {
                 Choice("音声出力",s.output,listOf("自動（内蔵）" to null)+outputs.map {it.description() to it.key()},!busy) {key ->vm.autoSettings {it.copy(output=key)}}
@@ -79,11 +81,12 @@ import kotlin.math.*
                 } else Text("測定中は音源・処理・ルートの変更をロックしています。")
             }
             val results: @Composable ()->Unit = {
-                Text(vm.autoProgress.detail, fontSize=16.sp)
-                Text("MIC ${fmt(vm.measurementRoute.inputDb)} dBFS / クリップ ${vm.measurementRoute.clips}")
+                if(diagnostic!=null) DiagnosticSummary(diagnostic)
+                Text(vm.autoProgress.detail, fontSize=14.sp)
+                Text(if(vm.measurementRoute.frames>0) "MIC ${fmt(vm.measurementRoute.inputDb)} dBFS / クリップ ${vm.measurementRoute.clips}" else "MICレベル・クリップ: 未評価")
                 Text(vm.measurementRoute.effects,fontSize=12.sp)
                 if(vm.maintainingRoute) {
-                    Text("校正条件を維持するためMIC録音・HFP通信経路を維持中（音声モニターなし）",color=RightOrange)
+                    Text("校正条件を維持するためMIC録音・測定出力経路を維持中（音声モニターなし）",color=RightOrange)
                     OutlinedButton(onClick={vm.stop();vm.releaseHeldRoute()}) {Text("MIC・通信経路を解放")}
                 }
                 Text(vm.calibrationStatus(),fontSize=13.sp)
@@ -91,21 +94,7 @@ import kotlin.math.*
                     OutlinedButton(onClick=vm::undoAuto,enabled=!busy && vm.session.calibration!=null) {Text("元に戻す")}
                     OutlinedButton(onClick={export(vm.exportAutoResult())},enabled=!busy && (vm.session.calibration!=null || vm.autoDiagnostic.isNotEmpty())) {Text("結果保存")}
                 }
-                val result=vm.autoResult
-                if(result!=null) {
-                    Text("有効ビン ${(result.pair.coverage*100).toInt()}% / ${fmt(s.lowHz,0)}–${fmt(s.highHz,0)} Hz内。重み0の帯域は評価対象外。")
-                    Text("反復差 ${fmt(result.pair.repeatDb)} dB / ${fmt(result.pair.repeatPhase)}°\nクロック差 ${fmt(result.timing.ppm)} ppm / 同期残差 ${fmt(result.timing.residual,3)} sample")
-                    result.verification.forEachIndexed {i,v->Text("検証${i+1}: 片側比 ${fmt(v.reductionSingleDb)} dB / 未補正両側比 ${fmt(v.reductionBothDb)} dB${if(v.noiseLimited) "（測定限界・ノイズ床）" else ""}")}
-                    Text("有限長FIR予測残差 ${fmt(result.solution.predictedDb)} dB / 最大ブースト ${fmt(result.solution.maxBoostDb)} dB")
-                    val bins=result.pair.weights.indices.filter {it*SAMPLE_RATE.toDouble()/TransferEstimator.SIZE in s.lowHz..s.highHz}
-                    fun values(f: (Int)->Double)=DoubleArray(bins.size) {f(bins[it])}
-                    Chart(values {levelDb(result.pair.right.magnitude(it))},values {levelDb(result.pair.left.magnitude(it))},null,null,null,"${fmt(s.lowHz,0)}–${fmt(s.highHz,0)} Hz / 青=左 緑=右","測定応答 dB")
-                    Chart(values {wrapPhase((atan2(result.pair.right.im[it],result.pair.right.re[it])-atan2(result.pair.left.im[it],result.pair.left.re[it]))*180/PI)},null,null,-180.0,180.0,"同じ共通時刻基準の右−左","相対位相 °")
-                    Chart(values {levelDb(result.corrected.magnitude(it))},values {levelDb(result.both.magnitude(it))},values {levelDb(result.single.magnitude(it))},null,null,"青=未補正両側 緑=補正後 点線=片側基準","MIC録音応答 dB")
-                    val verification=result.verification.last()
-                    Chart(verification.bandReduction.toDoubleArray(),null,null,null,null,"低域→高域 / 1/3オクターブ","低減量 dB")
-                    Text("設計した左右FIRの応答と係数は「FIR編集」で確認できます。")
-                }
+                if(diagnostic!=null) DiagnosticPanel(vm,diagnostic)
                 Text("1測定点でのMIC録音上の相対低減量です。未校正の音圧dB SPLではありません。MICを固定して左右を確認してください。HFP内部のAGC・NS等は解除できるとは限りません。",fontSize=12.sp)
                 Text("合格基準: SNR 20 dB、反復差1 dB・5°以内、有効ビン80%以上。片側／両側比とも3 dB以上低減を2回確認。帯域別悪化は3 dB以内。",fontSize=12.sp)
             }
@@ -115,4 +104,77 @@ import kotlin.math.*
             } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {controls();results()}
         }
     }
+}
+
+@Composable private fun DiagnosticPanel(vm: AppViewModel, d: org.json.JSONObject) {
+    val q=d.optJSONObject("quality")
+    val settings=d.optJSONObject("settings")
+    val low=settings?.optDouble("lowHz") ?: vm.session.autoFir.lowHz
+    val high=settings?.optDouble("highHz") ?: vm.session.autoFir.highHz
+    Text("測定時の要求: ${d.optString("requested","未評価")}",fontSize=11.sp)
+    Text("測定時の実ルート: ${d.optString("actual","未評価")}",fontSize=11.sp)
+    Text(d.optString("pcm","PCM未評価"),fontSize=11.sp)
+    Text(d.optString("effects","入力効果は未評価"),fontSize=11.sp)
+    Text("測定時の入力クリップ: ${if(d.has("clips")) d.optLong("clips").toString() else "未評価"}",fontSize=11.sp)
+    val suggestion=q?.optJSONObject("suggestion")
+    if(q!=null && !q.optBoolean("eligible") && suggestion==null) Text("連続した有効帯域は未検出です。MIC固定・周囲の静音・録音プリセットを確認してください。",fontSize=12.sp)
+    if(suggestion!=null && !q.optBoolean("eligible")) {
+        Text("連続有効帯域の候補: ${fmt(suggestion.getDouble("lowHz"),0)}–${fmt(suggestion.getDouble("highHz"),0)} Hz。自動縮小はしていません。")
+        OutlinedButton(onClick=vm::applySuggestedBand,enabled=!vm.autoBusy) {Text("提案帯域に変更して再測定")}
+    }
+    val warnings=d.optJSONArray("warnings")
+    if(warnings!=null) for(i in 0 until warnings.length()) Text(warnings.getJSONObject(i).optString("message"),fontSize=12.sp,color=RightOrange)
+    val t=d.optJSONObject("timing")
+    if(t!=null) {
+        Text("パイロット時刻モデルの残差: 最大 ${fmt(t.optDouble("residual48k"),3)} sample / ${fmt(t.optDouble("residualMicroseconds"),2)} µs、RMS ${fmt(t.optDouble("rmsResidual48k"),3)} sample")
+        Text("クロック差 ${fmt(t.optDouble("clockPpm"),2)} ppm / 相対音響位相の誤差を直接表す値ではありません",fontSize=12.sp)
+        val pilots=t.optJSONArray("pilots")
+        if(pilots!=null) {
+            Chart(DoubleArray(pilots.length()) {pilots.getJSONObject(it).getDouble("signedResidual48k")},null,null,null,null,"送信順 / 符号付き残差","パイロット残差 sample")
+            for(i in 0 until pilots.length()) {
+                val p=pilots.getJSONObject(i)
+                Text("#${i+1} 相関 ${fmt(p.getDouble("correlation"),3)} / 競合比 ${fmt(p.getDouble("competitorRatio"),3)} / 残差 ${fmt(p.getDouble("signedResidual48k"),3)} sample",fontSize=11.sp)
+            }
+        }
+    } else Text("パイロット時刻モデル: 未評価")
+    if(q!=null) {
+        val bins=(0..TransferEstimator.SIZE/2).filter {it*SAMPLE_RATE.toDouble()/TransferEstimator.SIZE in low..high}
+        fun values(a: org.json.JSONArray)=DoubleArray(bins.size) {a.optDouble(bins[it],Double.NaN)}
+        val l=q.getJSONObject("left");val r=q.getJSONObject("right")
+        fun magnitude(o: org.json.JSONObject)=DoubleArray(bins.size) {val k=bins[it];levelDb(hypot(o.getJSONArray("real").getDouble(k),o.getJSONArray("imaginary").getDouble(k)))}
+        Chart(magnitude(r),magnitude(l),null,null,null,"青=左 緑=右 / Hz範囲は評価帯域","伝達特性 dB")
+        Chart(DoubleArray(bins.size) {val k=bins[it];wrapPhase((atan2(r.getJSONArray("imaginary").getDouble(k),r.getJSONArray("real").getDouble(k))-
+            atan2(l.getJSONArray("imaginary").getDouble(k),l.getJSONArray("real").getDouble(k)))*180/PI)},null,null,-180.0,180.0,"左右共通の時刻基準 / 右−左","伝達特性の相対位相 °")
+        Chart(values(r.getJSONArray("snrDb")),values(l.getJSONArray("snrDb")),null,null,null,"青=左 緑=右 / 基準20 dB","周波数別SNR dB")
+        Chart(values(q.getJSONArray("rightRepeatDb")),values(q.getJSONArray("leftRepeatDb")),null,0.0,null,"青=左 緑=右 / 基準1 dB","反復振幅差 dB")
+        Chart(values(q.getJSONArray("rightRepeatPhaseDeg")),values(q.getJSONArray("leftRepeatPhaseDeg")),null,0.0,180.0,"青=左 緑=右 / 基準5°","反復位相差 °")
+        Chart(values(q.getJSONArray("weights")),null,null,0.0,1.0,"補正前に固定 / 0は評価対象外","評価重み")
+    }
+    for(key in listOf("designSignalTransfers","bandNoiseTransfers")) {
+        val spectra=d.optJSONArray(key) ?: continue
+        if(spectra.length()>=3) {
+            fun power(i: Int): DoubleArray {
+                val a=spectra.getJSONObject(i).getJSONArray("recordedPower")
+                val bins=(0 until a.length()).filter {it*SAMPLE_RATE.toDouble()/TransferEstimator.SIZE in low..high}
+                return DoubleArray(bins.size) {10*log10(a.getDouble(bins[it]).coerceAtLeast(1e-24))}
+            }
+            Chart(power(2),power(1),power(0),null,null,"青=両側 緑=補正後 点線=片側 / $key","MIC録音スペクトル dB")
+        }
+    }
+    Text("理由コード: ${d.optString("reasonCode","未評価")}",fontSize=12.sp)
+}
+
+@Composable private fun DiagnosticSummary(d: org.json.JSONObject) {
+    val q=d.optJSONObject("quality")
+    val settings=d.optJSONObject("settings") ?: return
+    val low=settings.optDouble("lowHz");val high=settings.optDouble("highHz")
+    fun status(key: String)=if(!d.has(key)) "未評価" else if(d.optBoolean(key)) "可" else "未成立"
+    Text("測定時の判定: 解析 ${status("analyzable")} / 試験 ${status("trialEligible")} / 正式反映 ${status("applicable")}")
+    Text("評価帯域 ${fmt(low,0)}–${fmt(high,0)} Hz / 要求帯域の有効率 ${q?.let {fmt(it.optDouble("coverage")*100)+"%"} ?: "未評価"}")
+    val ver=d.optJSONArray("verification")
+    if(ver==null) Text("片側比／両側比の低減量: 未評価") else for(i in 0 until ver.length()) {
+        val v=ver.getJSONObject(i);val r=v.getJSONObject("assessment").optJSONObject("result")
+        Text("${v.optString("signal")} ${v.optInt("repeat")}: "+(r?.let {"片側比 ${fmt(it.optDouble("singleReductionDb"))} dB / 両側比 ${fmt(it.optDouble("bothReductionDb"))} dB"} ?: "未評価"))
+    }
+    Text("実際の測定条件・詳細は下へスクロール",fontSize=11.sp)
 }

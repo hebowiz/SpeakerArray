@@ -20,6 +20,7 @@ import kotlin.math.*
 
 data class MeasurementRouteState(val requested: String="", val actual: String="未確認", val pcm: String="未確認",
     val inputDb: Double=-120.0, val clips: Long=0, val effects: String="", val frames: Long=0)
+data class CaptureClock(val frame: Long, val readFrames: Int, val nanoTime: Long)
 
 /** One uninterrupted capture and one stereo stream. Reads/writes are nonblocking with deadlines. */
 class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo, val input: AudioDeviceInfo,
@@ -30,7 +31,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
     private val failure=AtomicReference<String?>(null)
     private val attributes=AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
     private val focus=AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attributes)
-        .setOnAudioFocusChangeListener({if(it!=AudioManager.AUDIOFOCUS_GAIN) fail("音声フォーカス喪失")},main).build()
+        .setOnAudioFocusChangeListener({if(ownsFocus && it!=AudioManager.AUDIOFOCUS_GAIN) fail("音声フォーカス喪失")},main).build()
     private var track: AudioTrack?=null
     private var record: AudioRecord?=null
     private val effects=mutableListOf<AudioEffect>()
@@ -38,6 +39,16 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
     @Volatile private var closed=false
     @Volatile private var stable=false
     @Volatile private var captureFrames=0
+    @Volatile var captureOriginFrames=0; private set
+    private val captureLock=Any()
+    @Volatile private var playback: ((FloatArray)->Boolean)?=null
+    @Volatile private var playbackFailure: ((String)->Unit)?=null
+    private var expectedMode=-1
+    @Volatile var timestampChecks=0; private set
+    @Volatile var timestampSupported=false; private set
+    private var timestampFrameOrigin: Long?=null
+    private val clocks=mutableListOf<CaptureClock>()
+    fun captureClocks()=synchronized(clocks) {clocks.toList()}
     @Volatile var inputDb=-120.0; private set
     @Volatile var clips=0L; private set
     private var capture: FloatArray?=null
@@ -62,6 +73,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
             check(routesMatch()) { "この端末では指定した入出力の同時使用を確認できない: ${state().actual}" }
             check(volumeIndex==lastVolume) { "システム音量が測定中に変わりました" }
             check(communication.ready()) { "HFP通信経路が失われました" }
+            check(mode==expectedMode) { "音声モードが測定条件と異なります" }
             check(track?.underrunCount==initialUnderruns) { "出力PCM欠落（underrun）" }
         }
         if(Build.VERSION.SDK_INT>=29) check(record?.activeRecordingConfiguration?.isClientSilenced!=true) { "OSによりMIC録音が無音化されています" }
@@ -70,7 +82,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         val t=track;val r=record
         return MeasurementRouteState("出力 ${output.description()} / MIC ${input.description()}",
             "出力 ${t?.routedDevice?.description() ?: "未確認"} / MIC ${r?.routedDevice?.description() ?: "未確認"}",
-            "要求: 出力48000 Hz stereo float / 入力${settings.inputRate} Hz mono PCM16・preset=${settings.preset}\n実PCM: 出力${t?.sampleRate ?: 0} Hz/${t?.channelCount ?: 0}ch / 入力${r?.sampleRate ?: 0} Hz/${r?.channelCount ?: 0}ch / codec不明",
+            "要求: 出力48000 Hz stereo float / 入力${settings.inputRate} Hz mono PCM16・preset=${settings.preset}\n実PCM: 出力${t?.sampleRate ?: "未評価"} Hz/${t?.channelCount ?: "未評価"}ch / 入力${r?.sampleRate ?: "未評価"} Hz/${r?.channelCount ?: "未評価"}ch / codec不明",
             inputDb,clips,effectInfo,captureFrames.toLong())
     }
     private fun publish() {val value=state();report(value)}
@@ -109,7 +121,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         track=t
         check(t.state==AudioTrack.STATE_INITIALIZED && t.channelCount==2 && t.setPreferredDevice(output)) {"ステレオ出力要求が拒否されました"}
         t.addOnRoutingChangedListener(routing,main);r.addOnRoutingChangedListener(routing,main)
-        val expectedSeconds=ceil(10*(settings.seconds+2*settings.tailSeconds+settings.latencySeconds+0.55)+45).toInt()
+        val expectedSeconds=ceil(8*(settings.seconds+2*settings.tailSeconds+settings.latencySeconds+1.0)+20).toInt()
         val captureSeconds=min(MeasurementLimits.MAX_SECONDS,expectedSeconds)
         // Capture + two analysis snapshots + FFT scratch must fit a bounded working set.
         val estimatedBytes=captureSeconds.toLong()*(settings.inputRate*12L+SAMPLE_RATE*8L)+48L*1024*1024
@@ -127,7 +139,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
             if(routesMatch()) {if(matchingSince==0L) matchingSince=now;if(now-matchingSince>300_000_000L && captureFrames>0) break} else matchingSince=0
             if(now>streamDeadline) {publish();error("この端末では指定した入出力の同時使用を確認できない: ${state().actual}")}
         }
-        lastVolume=volumeIndex;initialUnderruns=t.underrunCount;stable=true;publish()
+        lastVolume=volumeIndex;initialUnderruns=t.underrunCount;expectedMode=mode;stable=true;publish()
     }
     private fun readLoop(r: AudioRecord) {
         val pcm=ShortArray(1024);var last=System.nanoTime()
@@ -136,14 +148,30 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
                 val n=r.read(pcm,0,pcm.size,AudioRecord.READ_NON_BLOCKING)
                 check(n>=0) {"録音PCMエラー $n"}
                 if(n==0) {check(System.nanoTime()-last<2_000_000_000L) {"録音PCM受信停止"};Thread.sleep(3);continue}
-                last=System.nanoTime();val dest=capture
-                if(dest!=null) {
-                    check(captureFrames+n<=dest.size) {"録音メモリの上限時間を超えました"}
-                    for(i in 0 until n) dest[captureFrames+i]=pcm[i]/32768f
+                last=System.nanoTime()
+                synchronized(captureLock) {
+                    val dest=capture
+                    if(dest!=null) {
+                        val offset=captureFrames-captureOriginFrames
+                        check(offset+n<=dest.size) {"録音メモリの上限時間を超えました"}
+                        for(i in 0 until n) dest[offset+i]=pcm[i]/32768f
+                    }
+                    captureFrames+=n
                 }
                 var square=0.0
                 for(i in 0 until n) {val v=pcm[i]/32768.0;square+=v*v;if(abs(v)>=0.999) clips++}
-                inputDb=levelDb(sqrt(square/n));captureFrames+=n
+                inputDb=levelDb(sqrt(square/n))
+                if(stable && captureFrames%settings.inputRate<n) {
+                    val stamp=AudioTimestamp()
+                    if(r.getTimestamp(stamp,AudioTimestamp.TIMEBASE_MONOTONIC)==AudioRecord.SUCCESS) {
+                        timestampSupported=true;timestampChecks++
+                        // Timestamp is at the record server, ahead of unread buffered PCM.
+                        // A backwards timestamp is conclusive; forward loss is also checked acoustically.
+                        timestampFrameOrigin?.let {check(stamp.framePosition>=it) {"録音フレーム時刻が逆行しました"}}
+                        timestampFrameOrigin=stamp.framePosition
+                        synchronized(clocks) {if(clocks.size<256) clocks+=CaptureClock(stamp.framePosition,captureFrames,stamp.nanoTime)}
+                    }
+                }
                 if(stable && clips>0) error("MIC入力クリップ")
                 check()
                 if(System.nanoTime()-lastReported>200_000_000L) {lastReported=System.nanoTime();publish()}
@@ -155,7 +183,15 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         var active: Write?=null
         try {
             while(!closed) {
-                active=queue.poll();val pcm=active?.pcm ?: zero
+                active=queue.poll()
+                if(active==null) {
+                    zero.fill(0f)
+                    playback?.let {render ->
+                        try {if(!render(zero)) playback=null;Unit}
+                        catch(e: Exception) {zero.fill(0f);playback=null;playbackFailure?.invoke(e.message ?: "再生停止")}
+                    }
+                }
+                val pcm=active?.pcm ?: zero
                 var offset=0;var progress=System.nanoTime();val start=written
                 while(offset<pcm.size && !closed) {
                     check()
@@ -166,7 +202,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
                 }
                 active?.done?.complete(start);active=null
             }
-        } catch(e: Exception) {active?.done?.completeExceptionally(e);if(!closed) fail(e.message ?: "出力失敗")}
+        } catch(e: Exception) {active?.done?.completeExceptionally(e);playbackFailure?.invoke(e.message ?: "出力失敗");if(!closed) fail(e.message ?: "出力失敗")}
         finally {while(true) {val item=queue.poll() ?: break;item.done.completeExceptionally(IllegalStateException("出力停止"))}}
     }
     suspend fun write(pcm: FloatArray): Long {
@@ -176,15 +212,21 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         return job.done.await()
     }
     suspend fun silence(seconds: Double) {repeat(ceil(seconds*SAMPLE_RATE/BLOCK).toInt()) {write(FloatArray(BLOCK*2))}}
-    fun snapshot(): DoubleArray {check();val count=captureFrames;val data=checkNotNull(capture);return DoubleArray(count) {data[it].toDouble()}}
+    fun snapshot(): DoubleArray = synchronized(captureLock) {check();val count=captureFrames-captureOriginFrames;val data=checkNotNull(capture);DoubleArray(count) {data[it].toDouble()}}
+    fun discardCaptured() = synchronized(captureLock) {check();captureOriginFrames=captureFrames}
+    fun beginPlayback(render: (FloatArray)->Boolean, failed: (String)->Unit) {
+        check();check(playback==null);playbackFailure=failed;playback=render
+    }
+    fun endPlayback() {playback=null;playbackFailure=null}
     /** Keep HFP/recording conditions alive after acceptance. No microphone monitoring. */
     fun retain() {
-        capture=null
+        synchronized(captureLock) {capture=null}
         if(ownsFocus) {ownsFocus=false;manager.abandonAudioFocusRequest(focus)}
     }
     override fun close() {
         if(closed) return
         closed=true;stable=false
+        playbackFailure?.invoke("測定経路を解放しました");endPlayback()
         runCatching {track?.pause();track?.flush()};runCatching {record?.stop()}
         reader?.join(1000);writer?.join(1000)
         track?.let {runCatching {it.removeOnRoutingChangedListener(routing);it.release()}};track=null

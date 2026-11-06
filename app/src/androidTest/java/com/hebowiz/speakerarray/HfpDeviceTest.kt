@@ -21,6 +21,25 @@ import kotlinx.coroutines.withContext
 /** Explicit opt-in only: never run acoustic hardware checks in the ordinary regression suite. */
 @RunWith(AndroidJUnit4::class)
 class HfpDeviceTest {
+    @Test fun showSavedDiagnosticWithoutAudio() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("showDiagnostic")=="true")
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch(MainActivity::class.java).use {scenario ->
+            scenario.onActivity {activity ->
+                val vm=ViewModelProvider(activity)[AppViewModel::class.java]
+                vm.stop();vm.dismissMessage();vm.tab=3
+                assertFalse(vm.autoBusy)
+                val saved=org.json.JSONObject(vm.exportAutoResult())
+                assertTrue(saved.has("reasonCode"))
+                assertFalse(vm.maintainingRoute)
+            }
+            Thread.sleep(1500)
+            val image=instrumentation.uiAutomation.takeScreenshot()
+            File(instrumentation.targetContext.getExternalFilesDir(null),"practical-diagnostic-screen.png").outputStream().use {
+                image.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)
+            }
+        }
+    }
     @Test fun runAuthorizedAcousticMeasurement() = runBlocking<Unit> {
         val args=InstrumentationRegistry.getArguments()
         assumeTrue(args.getString("acousticMeasurement")=="true" && args.getString("physicalMappingConfirmed")=="true")
@@ -36,7 +55,8 @@ class HfpDeviceTest {
                 val inputs=vm.routes.devices(true).filter {it.type==AudioDeviceInfo.TYPE_BLUETOOTH_SCO}
                 require(inputs.size==1)
                 vm.dismissMessage()
-                vm.autoSettings {it.copy(output=output.key(),input=inputs.single().key(),preset=args.getString("preset")?.toIntOrNull() ?: 6,highHz=3400.0)}
+                vm.autoSettings {it.copy(output=output.key(),input=inputs.single().key(),preset=args.getString("preset")?.toIntOrNull() ?: 6,
+                    lowHz=args.getString("lowHz")?.toDoubleOrNull() ?: 300.0,highHz=args.getString("highHz")?.toDoubleOrNull() ?: 3400.0)}
                 vm.confirmMapping(vm.session.swapped)
                 args.getString("masterDb")?.toDoubleOrNull()?.let {level ->vm.update {it.copy(masterDb=level)}}
                 vm.tab=3;vm.startAuto()

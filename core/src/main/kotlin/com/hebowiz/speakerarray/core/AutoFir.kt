@@ -21,7 +21,7 @@ data class AutoFirSettings(
         finiteRange(latencySeconds,0.2,3.0,"同期探索秒")
         require(taps in listOf(257,513,1025)); finiteRange(regularization,0.0001,1.0,"正則化")
         finiteRange(maxBoostDb,0.0,12.0,"最大ブースト")
-        require(10*(seconds+2*tailSeconds+latencySeconds+0.55)+20<=MeasurementLimits.MAX_SECONDS) { "測定時間が上限を超えます" }
+        require(20*(seconds+2*tailSeconds+latencySeconds+1.0)+30<=MeasurementLimits.MAX_SECONDS) { "測定時間が上限を超えます" }
     }
 }
 
@@ -40,6 +40,8 @@ object MeasurementLimits {
 data class TimingFit(val offset: Double, val ratio: Double, val residual: Double,
                      val emitted: List<Double>, val captured: List<Double>) {
     val ppm get() = (ratio-1)*1e6
+    val signedResiduals get() = emitted.indices.map {captured[it]-offset-ratio*emitted[it]}
+    val rmsResidual get() = sqrt(signedResiduals.map {it*it}.average())
 }
 
 /** Coordinates passed here are both expressed in nominal 48 kHz frames. */
@@ -55,7 +57,7 @@ object MeasurementSync {
     }
     fun validate(fit: TimingFit) {
         require(fit.ratio.isFinite() && abs(fit.ppm) <= MeasurementLimits.MAX_CLOCK_PPM) { "クロック差が上限を超えました: ${fit.ppm} ppm" }
-        require(fit.residual <= MeasurementLimits.MAX_SYNC_RESIDUAL) { "同期残差 ${fit.residual} sample（${fit.residual*1000/SAMPLE_RATE} ms）。遅延変動・信号不足・同期検出誤差を確認してください" }
+        require(fit.residual.isFinite()) {"時刻モデルを推定できません"}
     }
     fun fit(emitted: List<Double>, captured: List<Double>)=estimate(emitted,captured).also {validate(it)}
 
@@ -73,6 +75,11 @@ object MeasurementSync {
 
     /** FFT matched filter. The same physical reference speaker supplies every pilot. */
     fun locate(pcm: DoubleArray, pilot: DoubleArray, from: Int, until: Int): Double {
+        val result=detect(pcm,pilot,from,until)
+        require(result.correlation>0.12) {"パイロットを識別できません"}
+        return result.position
+    }
+    fun detect(pcm: DoubleArray, pilot: DoubleArray, from: Int, until: Int): PilotDetection {
         val start=max(0,from); val end=min(pcm.size,until)
         require(end-start > pilot.size)
         val n=powerOfTwo(end-start+pilot.size)
@@ -81,14 +88,32 @@ object MeasurementSync {
         Fft.transform(a,ai); Fft.transform(b,bi)
         for(i in a.indices) { val r=a[i]*b[i]+ai[i]*bi[i]; ai[i]=ai[i]*b[i]-a[i]*bi[i]; a[i]=r }
         Fft.transform(a,ai,true)
-        val peak=(1 until end-start-pilot.size).maxBy { abs(a[it]) }
+        val search=1 until end-start-pilot.size
+        val peak=search.maxBy { abs(a[it]) }
         val value=abs(a[peak]); val energy=pilot.sumOf {it*it}
         require(value/energy > 1e-6) { "パイロット無信号・同期失敗" }
         val normalized=value/sqrt(energy*(0 until pilot.size).sumOf {pcm[start+peak+it].pow(2)}.coerceAtLeast(1e-30))
-        require(normalized > 0.12) { "パイロットを識別できません" }
-        val l=abs(a[peak-1]); val r=abs(a[peak+1])
-        val fraction=(0.5*(l-r)/(l-2*value+r)).coerceIn(-0.5,0.5)
-        return start+peak+fraction
+        // Bandlimited correlation interpolation (16x), including the complete local lobe.
+        fun interpolated(p: Double): Double {
+            var sum=0.0;var norm=0.0
+            for(j in floor(p).toInt()-15..floor(p).toInt()+16) {
+                val d=p-j
+                val w=if(abs(d)<1e-12) 1.0 else sin(PI*d)/(PI*d)*(0.5+0.5*cos(PI*d/16))
+                sum+=a[(j+n)%n]*w;norm+=w
+            }
+            return abs(sum/norm)
+        }
+        val fraction=(-16..16).maxBy {interpolated(peak+it/16.0)}/16.0
+        // Exclude the central correlation lobe, not a distant reflection or repeated pilot.
+        var radius=1
+        while(radius<240 && peak-radius>0 && peak+radius<search.last &&
+            (abs(a[peak-radius])>value*0.25 || abs(a[peak+radius])>value*0.25)) radius++
+        radius=max(radius,8)
+        val competitor=search.filter {abs(it-peak)>radius}.maxByOrNull {abs(a[it])} ?: peak
+        val background=search.filter {abs(it-peak)>max(radius,240)}.map {a[it]*a[it]}.average().let {if(it.isFinite()) sqrt(it) else 0.0}
+        val curvature=abs(2*value-abs(a[peak-1])-abs(a[peak+1])).coerceAtLeast(1e-20)
+        return PilotDetection(start+peak+fraction,normalized.coerceIn(0.0,1.0),value,
+            (start+competitor).toDouble(),abs(a[competitor])/value,sqrt(background/curvature))
     }
 }
 
@@ -110,6 +135,17 @@ object KnownProbe : MeasurementSignal {
         }
     }
     fun pilot(settings: AutoFirSettings) = generate(settings.copy(seconds=0.25,signal=ProbeKind.SWEEP))
+    fun noise(settings: AutoFirSettings, seed: Int=517): DoubleArray {
+        val count=Integer.highestOneBit((settings.seconds*SAMPLE_RATE).toInt());val n=count
+        val random=kotlin.random.Random(seed);val re=DoubleArray(n);val im=DoubleArray(n)
+        for(k in 1 until n/2) if(k*SAMPLE_RATE.toDouble()/n in settings.lowHz..settings.highHz) {
+            val phase=random.nextDouble()*2*PI
+            re[k]=cos(phase);im[k]=sin(phase);re[n-k]=re[k];im[n-k]=-im[k]
+        }
+        Fft.transform(re,im,true)
+        val peak=re.take(count).maxOf {abs(it)}.coerceAtLeast(1e-12)
+        return DoubleArray(count) {i->re[i]/peak*min(1.0,min(i,count-1-i)/480.0).coerceAtLeast(0.0)}
+    }
 }
 
 data class Transfer(val re: DoubleArray, val im: DoubleArray, val snrDb: DoubleArray,
@@ -155,30 +191,57 @@ object TransferEstimator {
     }
 
     fun pair(left: List<Transfer>, right: List<Transfer>, settings: AutoFirSettings): MeasuredPair {
+        val result=assess(left,right,settings)
+        require(result.eligible) {result.findings.joinToString {it.message}}
+        return result.pair
+    }
+    fun assess(left: List<Transfer>, right: List<Transfer>, settings: AutoFirSettings): PairAssessment {
         require(left.size>=2 && right.size>=2)
         fun mean(values: List<Transfer>)=Transfer(DoubleArray(SIZE/2+1) {k->values.map {it.re[k]}.average()},
-            DoubleArray(SIZE/2+1) {k->values.map {it.im[k]}.average()},DoubleArray(SIZE/2+1) {k->values.minOf {it.snrDb[k]}})
+            DoubleArray(SIZE/2+1) {k->values.map {it.im[k]}.average()},DoubleArray(SIZE/2+1) {k->values.minOf {it.snrDb[k]}},
+            DoubleArray(SIZE/2+1) {k->values.map {it.recordedPower[k]}.average()})
         val l=mean(left); val r=mean(right); val weights=DoubleArray(l.re.size)
+        val ldb=DoubleArray(weights.size) {Double.NaN};val rdb=DoubleArray(weights.size) {Double.NaN}
+        val lp=DoubleArray(weights.size) {Double.NaN};val rp=DoubleArray(weights.size) {Double.NaN}
+        val reasons=List(weights.size) {mutableListOf<String>()};val valid=BooleanArray(weights.size)
         var count=0; var accepted=0; var worstDb=0.0; var worstPhase=0.0
         for(k in weights.indices) {
             val hz=k*SAMPLE_RATE.toDouble()/SIZE
-            if(hz !in settings.lowHz..settings.highHz) continue
+            if(hz !in settings.lowHz..settings.highHz) {reasons[k]+="OUTSIDE_REQUEST";continue}
             count++
+            ldb[k]=0.0;rdb[k]=0.0;lp[k]=0.0;rp[k]=0.0
             var db=0.0; var phase=0.0
-            for(group in listOf(left,right)) for(t in group.drop(1)) {
-                db=max(db,abs(levelDb(t.magnitude(k))-levelDb(group[0].magnitude(k))))
-                phase=max(phase,abs(wrapPhase((atan2(t.im[k],t.re[k])-atan2(group[0].im[k],group[0].re[k]))*180/PI)))
+            for((channel,group) in listOf(left,right).withIndex()) for(t in group.drop(1)) {
+                val d=abs(levelDb(t.magnitude(k))-levelDb(group[0].magnitude(k)))
+                val p=abs(wrapPhase((atan2(t.im[k],t.re[k])-atan2(group[0].im[k],group[0].re[k]))*180/PI))
+                if(channel==0) {ldb[k]=max(ldb[k],d);lp[k]=max(lp[k],p)} else {rdb[k]=max(rdb[k],d);rp[k]=max(rp[k],p)}
+                db=max(db,d);phase=max(phase,p)
             }
+            if(l.snrDb[k]<MeasurementLimits.SNR_DB) reasons[k]+="LEFT_SNR"
+            if(r.snrDb[k]<MeasurementLimits.SNR_DB) reasons[k]+="RIGHT_SNR"
+            if(ldb[k]>MeasurementLimits.REPEAT_DB) reasons[k]+="LEFT_REPEAT_GAIN"
+            if(rdb[k]>MeasurementLimits.REPEAT_DB) reasons[k]+="RIGHT_REPEAT_GAIN"
+            if(lp[k]>MeasurementLimits.REPEAT_DEGREES) reasons[k]+="LEFT_REPEAT_PHASE"
+            if(rp[k]>MeasurementLimits.REPEAT_DEGREES) reasons[k]+="RIGHT_REPEAT_PHASE"
             worstDb=max(worstDb,db); worstPhase=max(worstPhase,phase)
             if(min(l.snrDb[k],r.snrDb[k]) >= MeasurementLimits.SNR_DB && db<=MeasurementLimits.REPEAT_DB && phase<=MeasurementLimits.REPEAT_DEGREES) {
                 accepted++
+                valid[k]=true
                 val edge=min((hz-settings.lowHz)/(settings.lowHz*0.2),(settings.highHz-hz)/(settings.highHz*0.1)).coerceIn(0.0,1.0)
                 weights[k]=0.5-0.5*cos(PI*edge)
             }
         }
         val coverage=accepted.toDouble()/max(1,count)
-        require(coverage>=MeasurementLimits.MIN_COVERAGE) { "品質不足: 有効帯域 ${(coverage*100).toInt()}%、反復 $worstDb dB / $worstPhase °" }
-        return MeasuredPair(l,r,weights,coverage,worstDb,worstPhase)
+        var bestStart=0;var bestLength=0;var begin=0;var length=0
+        for(k in valid.indices) {
+            if(valid[k]) {if(length==0) begin=k;length++;if(length>bestLength) {bestStart=begin;bestLength=length}}
+            else length=0
+        }
+        val suggestion=if(bestLength>=20) BandSuggestion(ceil(bestStart*SAMPLE_RATE.toDouble()/SIZE),
+            floor((bestStart+bestLength-1)*SAMPLE_RATE.toDouble()/SIZE)) else null
+        val findings=if(coverage>=MeasurementLimits.MIN_COVERAGE) emptyList() else listOf(Finding("BAND_QUALITY",Verdict.INSUFFICIENT,
+            "品質不足: 有効ビン ${round(coverage*1000)/10}%、反復最大 ${round(worstDb*10)/10} dB / ${round(worstPhase*10)/10}°"))
+        return PairAssessment(MeasuredPair(l,r,weights,coverage,worstDb,worstPhase),FrequencyQuality(ldb,rdb,lp,rp,reasons,valid,suggestion),findings)
     }
 }
 
@@ -244,13 +307,14 @@ object AutoFirDesigner {
 
 data class Verification(val reductionSingleDb: Double, val reductionBothDb: Double, val bandReduction: List<Double>, val noiseLimited: Boolean)
 object MeasurementQuality {
-    fun distinctChannels(pair: MeasuredPair) {
+    fun distinctChannels(pair: MeasuredPair): Finding? {
         val valid=pair.weights.indices.filter {pair.weights[it]>0}
         val different=valid.count {k ->
             abs(levelDb(pair.left.magnitude(k))-levelDb(pair.right.magnitude(k)))>1.0 ||
                 abs(wrapPhase((atan2(pair.right.im[k],pair.right.re[k])-atan2(pair.left.im[k],pair.left.re[k]))*180/PI))>10.0
         }
-        require(different>=valid.size*0.1) { "左右応答がほぼ同一で、独立した音響出力を確認できません。左右の確認とMIC位置を見直してください" }
+        return if(different<valid.size*0.1) Finding("SIMILAR_CHANNELS",Verdict.WARNING,
+            "左右応答がほぼ同一です。対称配置とモノラル化は1点MICでは区別できません。左右単独再生を確認し、必要ならMIC位置を変えて比較してください") else null
     }
     fun input(pcm: DoubleArray) {
         require(pcm.isNotEmpty() && pcm.all {it.isFinite()}) { "PCM欠落" }
@@ -258,15 +322,22 @@ object MeasurementQuality {
         require(pcm.sumOf {it*it}/pcm.size>1e-12) { "MIC無信号・無音化" }
     }
     fun verify(single: Transfer, both: Transfer, corrected: Transfer, weights: DoubleArray): Verification {
+        val assessment=assessVerification(single,both,corrected,weights)
+        require(assessment.passed) {assessment.findings.joinToString {it.message}}
+        return assessment.result!!
+    }
+    fun assessVerification(single: Transfer, both: Transfer, corrected: Transfer, weights: DoubleArray): VerificationAssessment {
         val valid=weights.indices.filter {weights[it]>0}
-        require(valid.size>=20) { "検証帯域不足" }
+        if(valid.size<20) return VerificationAssessment(null,listOf(Finding("VERIFICATION_BAND",Verdict.INSUFFICIENT,"検証帯域不足")))
         fun energy(t: Transfer, bins: List<Int>)=bins.sumOf {weights[it]*t.recordedPower[it]}.coerceAtLeast(1e-24)
         fun improvement(base: Transfer, bins: List<Int>)=10*log10(energy(base,bins)/energy(corrected,bins))
-        require(valid.count {single.snrDb[it]>=20 && both.snrDb[it]>=20}>=valid.size*0.8) { "基準音がノイズ床付近・測定限界" }
+        val findings=mutableListOf<Finding>()
+        if(valid.any {single.snrDb[it]<20 || both.snrDb[it]<20}) findings+=Finding("BASELINE_NOISE",Verdict.INSUFFICIENT,"固定した評価ビンで基準音がノイズ床付近です")
         val a=improvement(single,valid);val b=improvement(both,valid)
         val bands=valid.groupBy { floor(3*log2(max(1.0,it*SAMPLE_RATE.toDouble()/TransferEstimator.SIZE)/100)).toInt() }
         val reductions=bands.values.map { min(improvement(single,it),improvement(both,it)) }
-        require(a>=MeasurementLimits.IMPROVEMENT_DB && b>=MeasurementLimits.IMPROVEMENT_DB && reductions.all {it>=-MeasurementLimits.MAX_WORSENING_DB}) { "効果不足・未反映: 片側比 $a dB / 両側比 $b dB" }
-        return Verification(a,b,reductions,valid.any {corrected.snrDb[it]<10})
+        if(a<MeasurementLimits.IMPROVEMENT_DB || b<MeasurementLimits.IMPROVEMENT_DB || reductions.any {it < -MeasurementLimits.MAX_WORSENING_DB})
+            findings+=Finding("INSUFFICIENT_REDUCTION",Verdict.INSUFFICIENT,"効果不足・未反映: 片側比 $a dB / 両側比 $b dB")
+        return VerificationAssessment(Verification(a,b,reductions,valid.any {corrected.snrDb[it]<10}),findings)
     }
 }

@@ -4,9 +4,10 @@ package com.hebowiz.speakerarray.core
 class CalibrationTransaction(val original: Session, val generation: Long) {
     private var ended=false
     fun rollback(): Session {ended=true;return original}
-    fun accept(profile: CalibrationProfile, verification: List<Verification>): Session {
+    fun accept(profile: CalibrationProfile, verification: List<Verification>, evidence: AcceptanceEvidence): Session {
         check(!ended && profile.generation==generation) {"古い測定結果・取消済みの結果は反映できません"}
-        require(verification.size>=2 && verification.all {
+        require(evidence.accepted) {"同期・品質・固定帯域・前後基準・別信号・再生経路の確認が不足しています"}
+        require(verification.size>=4 && verification.all {
             it.reductionSingleDb>=MeasurementLimits.IMPROVEMENT_DB && it.reductionBothDb>=MeasurementLimits.IMPROVEMENT_DB &&
                 it.bandReduction.isNotEmpty() && it.bandReduction.all {v->v>=-MeasurementLimits.MAX_WORSENING_DB}
         }) {"再測定の品質基準を満たしていません"}

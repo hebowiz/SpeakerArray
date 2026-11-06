@@ -3,29 +3,56 @@ package com.hebowiz.speakerarray
 import com.hebowiz.speakerarray.core.*
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlin.math.*
 
+/** Full resolution on disk, including failed stages. UI downsampling never changes evaluation. */
 object MeasurementResultStore {
-    fun encode(r: AutoMeasurementResult, generation: Long): String {
-        val bins=r.pair.weights.indices.filter {it%8==0 && it>0}
-        fun values(f: (Int)->Double)=JSONArray(bins.map {f(it).let {v->if(v.isFinite()) v else -120.0}})
-        fun transfer(t: Transfer)=JSONObject().put("magnitudeDb",values {levelDb(t.magnitude(it))})
-            .put("phaseDeg",values {atan2(t.im[it],t.re[it])*180/PI}).put("snrDb",values {t.snrDb[it]})
-            .put("recordedPowerDb",values {10*log10(t.recordedPower[it].coerceAtLeast(1e-24))})
-        return JSONObject().put("type","speakerarray-measurement").put("schemaVersion",1).put("generation",generation)
-            .put("startedAtEpochMs",r.startedAt).put("recordedFrames",r.recordedFrames).put("outputRate",SAMPLE_RATE)
-            .put("settings",CalibrationRepository.settings(r.settings)).put("requested",r.route.requested)
-            .put("actual",r.route.actual).put("pcm",r.route.pcm).put("effects",r.route.effects).put("codec","unknown")
-            .put("systemVolumeIndex",r.volume).put("audioMode",r.mode).put("frequencyHz",values {it*SAMPLE_RATE.toDouble()/TransferEstimator.SIZE})
-            .put("weights",values {r.pair.weights[it]}).put("left",transfer(r.pair.left)).put("right",transfer(r.pair.right))
-            .put("single",transfer(r.single)).put("both",transfer(r.both)).put("corrected",transfer(r.corrected))
-            .put("relativePhaseDeg",values {wrapPhase((atan2(r.pair.right.im[it],r.pair.right.re[it])-atan2(r.pair.left.im[it],r.pair.left.re[it]))*180/PI)})
-            .put("coverage",r.pair.coverage).put("repeatDb",r.pair.repeatDb).put("repeatPhaseDeg",r.pair.repeatPhase)
-            .put("timing",JSONObject().put("offset48k",r.timing.offset).put("ratio",r.timing.ratio).put("ppm",r.timing.ppm)
-                .put("residual48k",r.timing.residual).put("emittedFrames",JSONArray(r.timing.emitted)).put("capturedFrames48k",JSONArray(r.timing.captured)))
-            .put("predictedResidualDb",r.solution.predictedDb).put("maxBoostDb",r.solution.maxBoostDb).put("peakBound",r.solution.peakBound)
-            .put("verification",JSONArray(r.verification.map {JSONObject().put("singleReductionDb",it.reductionSingleDb)
-                .put("bothReductionDb",it.reductionBothDb).put("bandReductionDb",JSONArray(it.bandReduction)).put("noiseLimited",it.noiseLimited)}))
-            .put("leftFir",SessionRepository.firObject(r.solution.processing.left.fir)).put("rightFir",SessionRepository.firObject(r.solution.processing.right.fir)).toString(2)
+    fun failureCode(message: String): String = when {
+        "クリップ" in message -> "CLIPPING"
+        "PCM" in message || "フレーム" in message -> "PCM_DISCONTINUITY"
+        "パイロット" in message -> "PILOT_UNIDENTIFIED"
+        "権限" in message -> "PERMISSION"
+        "フォーカス" in message -> "FOCUS_LOST"
+        "音量" in message -> "VOLUME_CHANGED"
+        "経路" in message || "デバイス" in message || "モード" in message -> "ROUTE_OR_MODE"
+        "出力余裕" in message || "ブースト" in message -> "OUTPUT_BOUND"
+        "収束" in message -> "DESIGN_CONVERGENCE"
+        else -> "ACQUISITION_OR_DESIGN_FAILURE"
     }
+    fun array(v: DoubleArray)=JSONArray(v.map {if(it.isFinite()) it else JSONObject.NULL})
+    fun findings(v: List<Finding>)=JSONArray(v.map {JSONObject().put("code",it.code).put("verdict",it.verdict.name).put("message",it.message)})
+    fun thresholds()=JSONObject().put("methodVersion",SyncPolicy.VERSION).put("snrDb",MeasurementLimits.SNR_DB)
+        .put("repeatDb",MeasurementLimits.REPEAT_DB).put("repeatPhaseDeg",MeasurementLimits.REPEAT_DEGREES)
+        .put("coverage",MeasurementLimits.MIN_COVERAGE).put("improvementDb",MeasurementLimits.IMPROVEMENT_DB)
+        .put("subbandWorseningDb",MeasurementLimits.MAX_WORSENING_DB).put("legacySyncWarningSamples",MeasurementLimits.MAX_SYNC_RESIDUAL)
+        .put("pilotCorrelation",SyncPolicy.MIN_CORRELATION).put("competitorRatio",SyncPolicy.MAX_COMPETITOR)
+        .put("minimumPilots",SyncPolicy.MIN_PILOTS).put("coarseDiscontinuityRule","quarter-cycle at requested highHz; all pilots retained")
+        .put("minimumPilotSpanSeconds",2).put("maxClockPpm",MeasurementLimits.MAX_CLOCK_PPM)
+        .put("stepModelMinPointsPerSide",3).put("stepResidualFractionOfJump",0.2).put("stepResidualFractionOfLinearResidual",0.25)
+        .put("correlationInterpolationFactor",16).put("suggestedBandMinimumBins",20).put("inputClipMagnitude",0.999)
+    fun transfer(t: Transfer)=JSONObject().put("real",array(t.re)).put("imaginary",array(t.im))
+        .put("snrDb",array(t.snrDb)).put("recordedPower",array(t.recordedPower))
+    fun sync(s: SyncAssessment)=JSONObject().put("method",SyncPolicy.VERSION).put("offset48k",s.fit.offset)
+        .put("clockPpm",s.fit.ppm).put("ratio",s.fit.ratio).put("residual48k",s.fit.residual)
+        .put("rmsResidual48k",s.fit.rmsResidual).put("residualMicroseconds",s.fit.residual*1e6/SAMPLE_RATE)
+        .put("analyzable",s.analyzable).put("reliable",s.reliable).put("used",JSONArray(s.used)).put("excluded",JSONArray(s.excluded))
+        .put("findings",findings(s.findings)).put("pilots",JSONArray(s.pilots.mapIndexed {i,p ->JSONObject()
+            .put("emittedFrame",s.fit.emitted[i]).put("detectedFrame48k",p.position)
+            .put("predictedFrame48k",s.fit.offset+s.fit.ratio*s.fit.emitted[i]).put("signedResidual48k",s.fit.signedResiduals[i])
+            .put("correlation",p.correlation).put("peak",p.peak).put("competitorFrame48k",p.competitorPosition)
+            .put("competitorRatio",p.competitorRatio).put("peakNoiseWidthSamples",p.uncertaintySamples)
+            .put("confidence",if(p.correlation>=SyncPolicy.MIN_CORRELATION && p.competitorRatio<=SyncPolicy.MAX_COMPETITOR) "MATCHED" else "AMBIGUOUS")}))
+    fun pair(a: PairAssessment): JSONObject {
+        val p=a.pair;val q=a.quality
+        return JSONObject().put("eligible",a.eligible).put("coverage",p.coverage).put("left",transfer(p.left)).put("right",transfer(p.right))
+            .put("weights",array(p.weights)).put("valid",JSONArray(q.valid.toList())).put("reasons",JSONArray(q.reasons.map {JSONArray(it)}))
+            .put("leftRepeatDb",array(q.leftRepeatDb)).put("rightRepeatDb",array(q.rightRepeatDb))
+            .put("leftRepeatPhaseDeg",array(q.leftRepeatPhase)).put("rightRepeatPhaseDeg",array(q.rightRepeatPhase))
+            .put("findings",findings(a.findings)).put("suggestion",q.suggestion?.let {JSONObject().put("lowHz",it.lowHz).put("highHz",it.highHz)} ?: JSONObject.NULL)
+    }
+    fun verification(v: VerificationAssessment)=JSONObject().put("passed",v.passed).put("findings",findings(v.findings))
+        .put("result",v.result?.let {JSONObject().put("singleReductionDb",it.reductionSingleDb).put("bothReductionDb",it.reductionBothDb)
+            .put("bandReductionDb",JSONArray(it.bandReduction)).put("noiseLimited",it.noiseLimited)} ?: JSONObject.NULL)
+    fun solution(s: FirSolution)=JSONObject().put("predictedResidualDb",s.predictedDb).put("maxBoostDb",s.maxBoostDb).put("peakBound",s.peakBound)
+        .put("leftFir",SessionRepository.firObject(s.processing.left.fir)).put("rightFir",SessionRepository.firObject(s.processing.right.fir))
+    fun encode(r: AutoMeasurementResult, generation: Long): String = JSONObject(r.diagnosticJson).put("generation",generation).toString(2)
 }

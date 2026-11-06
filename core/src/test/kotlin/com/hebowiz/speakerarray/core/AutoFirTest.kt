@@ -44,9 +44,10 @@ class AutoFirTest {
         assertEquals(21.0,(fit.offset+fit.ratio*100021-(fit.offset+fit.ratio*100000))/fit.ratio,1e-7)
     }
     @Test fun latencyJumpAndMissingFramesAreRejected() {
-        val emitted=listOf(10000.0,100000.0,200000.0,300000.0)
+        val emitted=(0..7).map {10000.0+it*100000}
         for(jump in listOf(-480.0,48.0,160.0)) {
-            assertThrows(IllegalArgumentException::class.java) {MeasurementSync.fit(emitted,emitted.mapIndexed {i,v->v+45000+if(i>=2) jump else 0.0})}
+            val pilots=emitted.mapIndexed {i,v->PilotDetection(v+45000+if(i>=4) jump else 0.0,1.0,1.0,0.0,0.1,0.01)}
+            assertFalse(SyncPolicy.assess(emitted,pilots,3400.0).analyzable)
         }
     }
     @Test fun resamplingDifferentInputRatePreservesToneAndDelay() {
@@ -125,22 +126,23 @@ class AutoFirTest {
         assertThrows(IllegalStateException::class.java) {AutoFirDesigner.design(pair(transfer(0 to 1.0),transfer(20 to 1.0)),settings,-24.0) {if(++checks==2) error("cancel")}}
     }
     @Test fun indistinguishableChannelsCannotCertifyStereo() {
-        assertThrows(IllegalArgumentException::class.java) {MeasurementQuality.distinctChannels(pair(transfer(0 to 1.0),transfer(0 to 1.0)))}
+        assertEquals(Verdict.WARNING,MeasurementQuality.distinctChannels(pair(transfer(0 to 1.0),transfer(0 to 1.0)))!!.verdict)
         MeasurementQuality.distinctChannels(pair(transfer(0 to 1.0),transfer(20 to 0.8)))
     }
     @Test fun rollbackPreservesFullSessionAndLateGenerationCannotCommit() {
         val original=Session(processing=Processing(phaseDeg=90.0),a=Processing(),b=Processing(delayUs=5.0),swapped=true)
         val applied=Processing(length=1025)
         val profile=CalibrationProfile(42,settings,original.masterDb,true,5,0,false,applied,SessionRepository.encode(original),"{}")
-        val verified=List(2) {Verification(6.0,9.0,listOf(4.0,5.0),false)}
+        val evidence=AcceptanceEvidence(true,true,true,true,true,true)
+        val verified=List(4) {Verification(6.0,9.0,listOf(4.0,5.0),false)}
         for(stage in listOf("route","measurement","design","trial","verification")) {
             val transaction=CalibrationTransaction(original,42)
             assertEquals(stage,original,transaction.rollback())
-            assertThrows(IllegalStateException::class.java) {transaction.accept(profile,verified)}
+            assertThrows(IllegalStateException::class.java) {transaction.accept(profile,verified,evidence)}
         }
-        assertThrows(IllegalStateException::class.java) {CalibrationTransaction(original,43).accept(profile,verified)}
-        assertThrows(IllegalArgumentException::class.java) {CalibrationTransaction(original,42).accept(profile,verified.take(1))}
-        val accepted=CalibrationTransaction(original,42).accept(profile,verified)
+        assertThrows(IllegalStateException::class.java) {CalibrationTransaction(original,43).accept(profile,verified,evidence)}
+        assertThrows(IllegalArgumentException::class.java) {CalibrationTransaction(original,42).accept(profile,verified.take(1),evidence)}
+        val accepted=CalibrationTransaction(original,42).accept(profile,verified,evidence)
         assertEquals(applied,accepted.processing);assertNull(accepted.a);assertNull(accepted.b)
         assertEquals(original,SessionRepository.decode(accepted.calibration!!.backup))
     }
