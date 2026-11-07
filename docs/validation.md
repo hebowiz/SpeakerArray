@@ -540,3 +540,9 @@ RFMonitorは読み取りのみで、前後のHEAD `42604b8ea820cc439988ee006a398
 実装・回帰テスト・操作手順・報告書をコミット`10e641605ea611a5944efe7a1360b4c2ca7fd9bb`として`origin/feat/android-speaker-array`へpush済みです。同じコミットを指すタグ`poc-fir-listening-20261108`で[PoC試聴Release](https://github.com/hebowiz/SpeakerArray/releases/tag/poc-fir-listening-20261108)を公開しました。
 
 debug APK、テストAPK、検証資料ZIP、チェックサム一覧の4資産がGitHub上で`uploaded`になり、サイズとSHA-256がローカルと一致することを確認しました。資料ZIPのSHA-256は`ff0eb5fbda497cc71c34535f6dddc48d010748e029fc51c90a0d7fc6f454ad5c`です。最後の経路監視修正後もAndroid回帰7件が成功しています。専用エミュレーターを終了し、実機には新APKを導入していません。
+
+### PoC版のWi-Fi更新インストール（2026-11-08）
+
+ユーザーの追加依頼を受け、Wi-Fi ADBで接続したXQ-FS44へ、公開済みPoC版debug APKを`install -r`で更新インストールしました。既存データを保持する更新で、ADBは`Success`で終了しました。端末のversionNameは`0.1.0`、versionCodeは`1`、更新日時は`2026-11-08 00:11:38`です。
+
+端末からインストール済みAPKを取得し、SHA-256が`388932ee47015c1a6002ebcb58d5ac4d83f0860688bf46a2e9624e2232545f73`で、公開済みAPKと一致することを確認しました。今回の操作ではアプリ起動・音出し・MIC録音・音響測定を行っていません。
