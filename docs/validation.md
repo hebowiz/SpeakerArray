@@ -428,7 +428,7 @@ RFMonitorは読み取りだけで照合しました。開始・終了のHEAD、G
 
 ## 広帯域実証の準備（2026-11-07）
 
-開始時のブランチは`feat/android-speaker-array`、HEADは`d181668f825356efd3320e7fb38c52ddfa4d9f3a`で、作業ツリーはクリーンでした。今回の変更は同HEADへの未コミット差分です。commit・push・mainへのマージは行っていません。作業範囲は、ユーザーが300〜3,400 Hzで実機比較を行うための準備までです。
+開始時のブランチは`feat/android-speaker-array`、HEADは`d181668f825356efd3320e7fb38c52ddfa4d9f3a`で、作業ツリーはクリーンでした。実装完了時点では、今回の変更は同HEADへの未コミット差分で、commit・pushは未実施でした。実装時の作業範囲は、ユーザーが300〜3,400 Hzで実機比較を行うための準備までです。後続のpushとUSBインストールは本節末尾に記録しています。mainへのマージは行っていません。
 
 ### 履歴と広帯域評価
 
@@ -491,10 +491,16 @@ adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex
 
 今回のdebug APKは`app/build/outputs/apk/debug/app-debug.apk`、SHA-256は`5c481fe83f7f54a79cf171b2eeb88e0423023cbdedf0e1d2f85463e6c0c4014f`です。versionNameは`0.1.0`、versionCodeは`1`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`、SHA-256は`372a49aee2440bdbdafa48cd11320c99f1c4cb343b296e0c1a901ad245a07e88`です。
 
-前段でUSB実機へインストールしたAPKのSHA-256は`821938b861a8718faaf940ac69bae58fced23133a0d8dad09355bde3aac402d1`で、今回のAPKとは異なります。今回は実機への更新インストール・起動・設定操作・音出し・MIC録音を行っていません。実機での広帯域低減、同一候補の実行間再現性、実用化は未確認です。
+前段でUSB実機へインストールしたAPKのSHA-256は`821938b861a8718faaf940ac69bae58fced23133a0d8dad09355bde3aac402d1`で、今回のAPKとは異なります。実装完了時点では実機への更新インストール・起動・設定操作・音出し・MIC録音を行っていませんでした。実機での広帯域低減、同一候補の実行間再現性、実用化は未確認です。
 
 今回のビルドは開始時HEADにこの変更を加えたソースです。Android試験後、電力結果の表示を効果不足と増音に分け、負値の分類をJVMで確認しました。最終ソースで両APK・JVM・Lintを再実行し、その後は文書だけを更新しました。対象65ファイルのSHA-256一覧は`build/wideband-audit/source-sha256.txt`に保存し、一覧自体のSHA-256は`38f4ab35c2ce012f872435200c1039b201285ed898164d093f40b2d7cebcc8d2`です。対象は`app/src/`、`core/src/`、`gradle/`、`tools/`、`*.gradle.kts`、`gradle.properties`、`gradlew`、`gradlew.bat`です。相対パスを昇順に並べ、`SHA-256  相対パス`、UTF-8・LFで保存しています。
 
 RFMonitorは開始・終了のHEAD、Git状態、257ファイルのSHA-256が一致しました。読み取り以外の操作、編集・生成・ビルド・テスト・Git変更は行っていません。照合結果と試験ログはSpeakerArrayの無視対象`build/wideband-audit/`に保存しています。生診断、端末固有情報、APK、ローカル監査データをGitへ追加していません。
 
 ユーザー向けの[実機手順書](wideband-procedure.md)、[設置・測定記録テンプレート](wideband-record-template.md)、[比較集計CSVテンプレート](templates/wideband-comparison-template.csv)を用意しました。保存データの予測成功や狭帯域の成功を、新規広帯域測定の必須条件にはしていません。次はユーザーが同じ設置・音量・候補で3回の比較実行を行い、その結果JSONから予測との差と再現性を解析します。
+
+### 実装完了後のpushとUSBインストール（2026-11-07）
+
+ユーザーの依頼を受け、広帯域評価・比較履歴の再利用・テスト・分析資料・手順書をコミット`e050e3cfee4c42bcc8f7a5a0e054fe083f928e7e`として`origin/feat/android-speaker-array`へpushしました。push前にリモートとの分岐がないこと、検証済みソースなど65ファイルとAPKのSHA-256一致、差分検査の成功を確認しました。
+
+続いてUSB接続のXQ-FS44へ、上記SHA-256 `5c481fe83f7f54a79cf171b2eeb88e0423023cbdedf0e1d2f85463e6c0c4014f`のdebug APKを`install -r`で更新インストールしました。ADBは`Success`で終了し、端末側のversionName `0.1.0`、versionCode `1`、更新日時`2026-11-07 19:25:24`を確認しました。既存データを保持する更新です。アプリ起動・設定操作・音出し・MIC録音・音響実証は行っていません。

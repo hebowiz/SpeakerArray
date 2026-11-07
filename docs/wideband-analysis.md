@@ -82,4 +82,4 @@ Pythonはcoreが生成した結果を集計するだけで、別のFIR設計器�
 
 公開用の[元データ一覧](analysis/wideband-sources.csv)、[候補一覧](analysis/wideband-candidates.csv)、[全帯域・設計ビン予測](analysis/wideband-predictions.csv)、[サブバンド予測](analysis/wideband-subbands.csv)、[周波数別予測](analysis/wideband-frequencies.csv)を追加しました。元診断、端末固有情報、候補JSON、APK、監査ログはローカルの無視対象に置いています。
 
-ユーザーが行う次の測定は[実機手順書](wideband-procedure.md)にまとめています。今回は実機の更新インストール・起動・設定操作・音出し・MIC録音を行っていません。
+ユーザーが行う次の測定は[実機手順書](wideband-procedure.md)にまとめています。解析・実装時には実機を操作していません。実装後の依頼によりAPKをUSB実機へ更新インストールしましたが、アプリ起動・設定操作・音出し・MIC録音は行っていません。詳細は[検証記録](validation.md)に記載しています。
