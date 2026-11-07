@@ -76,8 +76,14 @@ object SyncPolicy {
 /** Bounds apply to known, normalized PCM; source and processing changes revoke the certificate. */
 object CalibrationPlaybackPolicy {
     fun peakBound(p: Processing, masterDb: Double): Double {
-        fun bound(c: Channel)=if(c.muted) 0.0 else FirDesigner.design(c.fir,p.length).sumOf {abs(it)}*dbGain(c.gainDb)
-        return max(bound(p.left),bound(p.right))*dbGain(masterDb)
+        fun bound(c: Channel,right: Boolean): Double {
+            val h=if(c.enabled) FirDesigner.design(c.fir,p.length) else FirDesigner.flat(p.length)
+            val d=FractionalDelay.kernel(max(0.0,if(right) p.delayUs else -p.delayUs)*SAMPLE_RATE/1e6)
+            val combined=DoubleArray(h.size+d.size-1)
+            for(i in h.indices) for(j in d.indices) combined[i+j]+=h[i]*d[j]
+            return if(c.muted) 0.0 else combined.sumOf {abs(it)}*dbGain(c.gainDb)
+        }
+        return max(bound(p.left,false),bound(p.right,true))*dbGain(masterDb)
     }
     fun matches(profile: CalibrationProfile, session: Session, volume: Int, mode: Int, held: Boolean) =
         profile.matches(session,volume) && profile.mode==mode && held && peakBound(session.processing,session.masterDb)<=0.9

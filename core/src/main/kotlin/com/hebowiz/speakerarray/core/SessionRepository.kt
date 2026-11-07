@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object SessionRepository {
+    const val MAX_SESSION_CHARS = 64_000_000
     private fun obj(vararg values: Pair<String, Any?>) = JSONObject().apply { values.forEach { put(it.first, it.second ?: JSONObject.NULL) } }
     private fun numbers(v: List<Double>) = JSONArray(v)
     private fun JSONArray.doubles() = List(length()) { getDouble(it) }
@@ -16,8 +17,12 @@ object SessionRepository {
     fun encode(s: Session): String {
         s.validate()
         val src = s.source
-        return obj("type" to "speakerarray-session", "schemaVersion" to 2, "sampleRateHz" to SAMPLE_RATE,
+        return obj("type" to "speakerarray-session", "schemaVersion" to 4, "sampleRateHz" to SAMPLE_RATE,
             "autoFir" to CalibrationRepository.settings(s.autoFir), "calibration" to s.calibration?.let {CalibrationRepository.profile(it)},
+            "adjustmentMethod" to s.adjustmentMethod.name,"autoToneHz" to s.autoToneHz,"toneProfile" to s.toneProfile?.let {tone(it)},
+            "correctionMode" to s.correctionMode.name, "simple" to simple(s.simple),
+            "correctionA" to s.correctionA?.let {snapshot(it)}, "correctionB" to s.correctionB?.let {snapshot(it)},
+            "externalLayouts" to JSONObject().apply {s.externalLayouts.forEach {(k,v)->put(k,obj("spacingMm" to v.spacingMm,"reversed" to v.reversed))}},
             "processing" to processing(s.processing), "masterDb" to s.masterDb, "swapped" to s.swapped,
             "reverseLandscape" to s.reverseLandscape, "orientationChosen" to s.orientationChosen,
             "spacingMm" to s.spacingMm, "soundSpeed" to s.soundSpeed, "evaluationHz" to s.evaluationHz,
@@ -28,11 +33,11 @@ object SessionRepository {
     }
     private fun header(o: JSONObject, type: String) {
         require(o.getString("type") == type) { "ファイル種別が違います（$type が必要です）" }
-        require(o.getDouble("schemaVersion") in (if(type=="speakerarray-session") listOf(1.0,2.0) else listOf(1.0))) { "未対応のschemaVersionです" }
+        require(o.getDouble("schemaVersion") in (if(type=="speakerarray-session") listOf(1.0,2.0,3.0,4.0) else listOf(1.0))) { "未対応のschemaVersionです" }
         require(o.getDouble("sampleRateHz") == SAMPLE_RATE.toDouble()) { "48 kHzの設定のみ対応します。FIRを再設計してください" }
     }
     fun decode(text: String): Session {
-        require(text.length <= 2_000_000) { "設定ファイルが大きすぎます" }
+        require(text.length <= MAX_SESSION_CHARS) { "設定ファイルが大きすぎます" }
         val o = JSONObject(text); header(o, "speakerarray-session")
         val v = o.getJSONObject("source")
         return Session(readProcessing(o.getJSONObject("processing")),
@@ -43,8 +48,35 @@ object SessionRepository {
             o.getDouble("spacingMm"), o.getDouble("soundSpeed"), o.getDouble("evaluationHz"),
             if (o.isNull("a")) null else readProcessing(o.getJSONObject("a")), if (o.isNull("b")) null else readProcessing(o.getJSONObject("b")),
             o.optJSONObject("autoFir")?.let {CalibrationRepository.readSettings(it)} ?: AutoFirSettings(),
-            o.optJSONObject("calibration")?.let {CalibrationRepository.readProfile(it)}).also { it.validate() }
+            o.optJSONObject("calibration")?.let {CalibrationRepository.readProfile(it)}).let {legacy ->
+                if(o.getInt("schemaVersion")<3) legacy else legacy.copy(
+                    adjustmentMethod=AdjustmentMethod.valueOf(o.optString("adjustmentMethod","FIR")),autoToneHz=o.optDouble("autoToneHz",legacy.source.frequency),toneProfile=o.optJSONObject("toneProfile")?.let {readTone(it)},
+                    correctionMode=CorrectionMode.valueOf(o.getString("correctionMode")),simple=readSimple(o.getJSONObject("simple")),
+                    correctionA=o.optJSONObject("correctionA")?.let {readSnapshot(it)},correctionB=o.optJSONObject("correctionB")?.let {readSnapshot(it)},
+                    externalLayouts=o.getJSONObject("externalLayouts").let {layouts->layouts.keys().asSequence().associateWith {k->
+                        val v=layouts.getJSONObject(k);SpeakerLayout(v.getDouble("spacingMm"),v.getBoolean("reversed"))}})
+            }.also { it.validate() }
     }
+    private fun simple(s: SimpleCorrection)=obj("left" to channel(s.left),"right" to channel(s.right),
+        "sinePhaseDeg" to s.sinePhaseDeg,"sineDelayUs" to s.sineDelayUs,"delayUs" to s.delayUs,"referenceHz" to s.referenceHz)
+    private fun readSimple(o: JSONObject)=SimpleCorrection(readChannel(o.getJSONObject("left")),readChannel(o.getJSONObject("right")),
+        o.getDouble("sinePhaseDeg"),o.getDouble("sineDelayUs"),o.getDouble("delayUs"),o.getDouble("referenceHz"))
+    private fun snapshot(s: CorrectionSnapshot): JSONObject = obj("mode" to s.mode.name,"fir" to processing(s.fir),"simple" to simple(s.simple),
+        "toneProfile" to s.toneProfile?.let {tone(it)},
+        "source" to JSONObject(encode(Session(source=s.source))).getJSONObject("source"),"calibration" to s.calibration?.let {CalibrationRepository.profile(it)})
+    private fun readSnapshot(o: JSONObject): CorrectionSnapshot {
+        val base=JSONObject(encode(Session())).put("source",o.getJSONObject("source"))
+        return CorrectionSnapshot(CorrectionMode.valueOf(o.getString("mode")),readProcessing(o.getJSONObject("fir")),readSimple(o.getJSONObject("simple")),
+            decode(base.toString()).source,o.optJSONObject("calibration")?.let {CalibrationRepository.readProfile(it)},o.optJSONObject("toneProfile")?.let {readTone(it)})
+    }
+    private fun tone(p: ToneProfile)=obj("simple" to simple(p.simple),"frequency" to p.frequency,"masterDb" to p.masterDb,
+        "swapped" to p.swapped,"settings" to CalibrationRepository.settings(p.settings),"volume" to p.volume,"mode" to p.mode,
+        "layout" to p.layout?.let {obj("spacingMm" to it.spacingMm,"reversed" to it.reversed)},"reverseLandscape" to p.reverseLandscape,
+        "backup" to JSONObject(p.backup),"result" to JSONObject(p.result))
+    private fun readTone(o: JSONObject)=ToneProfile(readSimple(o.getJSONObject("simple")),o.getDouble("frequency"),o.getDouble("masterDb"),
+        o.getBoolean("swapped"),CalibrationRepository.readSettings(o.getJSONObject("settings")),o.getInt("volume"),o.getInt("mode"),
+        o.optJSONObject("layout")?.let {SpeakerLayout(it.getDouble("spacingMm"),it.getBoolean("reversed"))},o.getBoolean("reverseLandscape"),
+        o.getJSONObject("backup").toString(),o.getJSONObject("result").toString())
     fun exportFir(spec: FirSpec, length: Int): String = obj("type" to "speakerarray-fir", "schemaVersion" to 1,
         "sampleRateHz" to SAMPLE_RATE, "coefficients" to numbers(FirDesigner.design(spec, length).toList()), "design" to firObject(spec)).toString(2)
     fun importFir(text: String, length: Int, csvRate: Int?): FirSpec {

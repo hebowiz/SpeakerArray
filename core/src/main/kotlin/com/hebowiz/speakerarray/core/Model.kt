@@ -22,7 +22,16 @@ data class Session(val processing: Processing = Processing(), val source: Source
     val masterDb: Double = -24.0, val swapped: Boolean = false, val reverseLandscape: Boolean = false,
     val orientationChosen: Boolean = false, val spacingMm: Double = 150.0, val soundSpeed: Double = 343.0,
     val evaluationHz: Double = 1143.0, val a: Processing? = null, val b: Processing? = null,
-    val autoFir: AutoFirSettings = AutoFirSettings(), val calibration: CalibrationProfile? = null) {
+    val autoFir: AutoFirSettings = AutoFirSettings(), val calibration: CalibrationProfile? = null,
+    val correctionMode: CorrectionMode = CorrectionMode.FIR,
+    val simple: SimpleCorrection = SimpleCorrection.from(processing,source.frequency),
+    val correctionA: CorrectionSnapshot? = null, val correctionB: CorrectionSnapshot? = null,
+    val externalLayouts: Map<String,SpeakerLayout> = emptyMap(),
+    val adjustmentMethod: AdjustmentMethod = AdjustmentMethod.FIR, val autoToneHz: Double = source.frequency,
+    val toneProfile: ToneProfile? = null) {
+    val externalOutput get() = RoutePolicy.external(autoFir.output?.type)
+    val layoutKey get() = autoFir.output?.let {"${it.type}/${it.name}/${it.address}"} ?: "builtin"
+    val activeLayout get() = if(externalOutput) externalLayouts[layoutKey] else SpeakerLayout(spacingMm)
     val previewFrequencyHz: Double
         get() = if (source.kind == SourceKind.SINE) source.frequency else evaluationHz
 }
@@ -41,7 +50,11 @@ fun Processing.validate() {
 }
 fun Session.validate() {
     autoFir.validate()
-    processing.validate()
+    finiteRange(autoToneHz,20.0,20000.0,"自動調整周波数 Hz")
+    toneProfile?.simple?.validate()
+    processing.validate();simple.validate()
+    listOfNotNull(correctionA,correctionB).forEach {it.fir.validate();it.simple.validate();it.source.validate()}
+    externalLayouts.values.forEach {finiteRange(it.spacingMm,0.0,3000.0,"外部音源間隔 mm")}
     finiteRange(masterDb, -60.0, 0.0, "共通出力 dB")
     finiteRange(spacingMm, 0.0, 3000.0, "音源間隔 mm")
     finiteRange(soundSpeed, 250.0, 400.0, "音速 m/s")

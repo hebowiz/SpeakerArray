@@ -54,9 +54,10 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
                     try {
                         val text = withContext(Dispatchers.IO) {
                             context.contentResolver.openInputStream(uri)!!.bufferedReader().use { r ->
-                                val chars = CharArray(2_000_001); var count = 0
-                                while(count < chars.size) { val n = r.read(chars,count,chars.size-count); if(n < 0) break; count += n }
-                                require(count <= 2_000_000) { "ファイルが大きすぎます" }; String(chars,0,count)
+                                val limit=if(fileAction=="session") SessionRepository.MAX_SESSION_CHARS else 2_000_000
+                                val chars = CharArray(65536);val result=StringBuilder();var count=0
+                                while(true) {val n=r.read(chars);if(n<0) break;count+=n;require(count<=limit) {"ファイルが大きすぎます"};result.append(chars,0,n)}
+                                result.toString()
                             }
                         }
                         if(fileAction == "session") vm.loadSession(text)
@@ -178,7 +179,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
 }
 
 @Composable private fun ChannelCard(vm: AppViewModel, right: Boolean, modifier: Modifier) {
-    val c=if(right) vm.session.processing.right else vm.session.processing.left
+    val c=vm.session.effectiveProcessing().let {if(right) it.right else it.left}
     val color=if(right) RightOrange else LeftBlue
     Card(modifier,colors=CardDefaults.cardColors(containerColor=Panel)) {
         Column(Modifier.padding(8.dp)) {
@@ -193,7 +194,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
             Toggle("ミュート",c.muted) {v ->vm.channel(right) {it.copy(muted=v)}}
             OutlinedButton(onClick={vm.solo(right)}) {Text("この側だけ／解除")}
             Toggle("極性反転",c.inverted) {v ->vm.channel(right) {it.copy(inverted=v)}}
-            Text("FIR: ${if(c.enabled) firName(c.fir.mode) else "バイパス"}",fontSize=12.sp)
+            Text("FIR: ${if(vm.session.correctionMode==CorrectionMode.SIMPLE) "保存中・単純補正では未使用" else if(c.enabled) firName(c.fir.mode) else "バイパス"}",fontSize=12.sp)
             TextButton(onClick={vm.selectSide(right);vm.tab=1}) {Text("${if(right) "右" else "左"}のFIR編集",color=color)}
         }
     }
@@ -202,7 +203,9 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
     Row(Modifier.heightIn(min=48.dp).clickable {change(!value)},verticalAlignment=Alignment.CenterVertically) {Checkbox(value,change);Text(label,fontSize=14.sp)}
 }
 @Composable private fun Playback(vm: AppViewModel, mapping: () -> Unit, wav: () -> Unit) {
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+        CorrectionSelector(vm)
+        BoxWithConstraints(Modifier.weight(1f)) {
         val wide=maxWidth>=650.dp
         if(wide) Row(Modifier.fillMaxSize().padding(8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             ChannelCard(vm,false,Modifier.weight(0.25f).fillMaxHeight().verticalScroll(rememberScrollState()))
@@ -211,12 +214,36 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
         } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             SourcePanel(vm,mapping,wav,Modifier.fillMaxWidth());ChannelCard(vm,false,Modifier.fillMaxWidth());ChannelCard(vm,true,Modifier.fillMaxWidth())
         }
+        }
+    }
+}
+@Composable internal fun CorrectionSelector(vm: AppViewModel) {
+    FlowRow(Modifier.fillMaxWidth().padding(horizontal=8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        listOf(CorrectionMode.SIMPLE to "位相・振幅",CorrectionMode.FIR to "FIR").forEach {(mode,label)->
+            FilterChip(vm.session.correctionMode==mode,{vm.correction(mode)},enabled=!vm.autoBusy,label={Text(label)})
+        }
+        val pending=vm.audio.playing && (vm.audio.generation!=vm.generation || vm.audio.switching)
+        Text(if(vm.preparing) "準備中 / 選択 ${if(vm.session.correctionMode==CorrectionMode.FIR) "FIR" else "位相・振幅"}" else if(pending) "切替中 / 適用済み ${if(vm.appliedMode==CorrectionMode.FIR) "FIR" else "位相・振幅"}" else
+            "${if(vm.audio.playing) "適用済み" else "停止中の選択"}: ${if(vm.session.correctionMode==CorrectionMode.FIR) "FIR" else "位相・振幅"}",modifier=Modifier.padding(12.dp),fontSize=12.sp)
     }
 }
 @Composable private fun SourcePanel(vm: AppViewModel, mapping: () -> Unit, wav: () -> Unit, modifier: Modifier) {
-    val s=vm.session;val p=s.processing;val src=s.source
+    val s=vm.session;val p=s.effectiveProcessing();val src=s.source
     var details by remember {mutableStateOf(false)}
     Column(modifier,verticalArrangement=Arrangement.spacedBy(4.dp)) {
+        OutputSelector(vm)
+        if(s.correctionMode==CorrectionMode.SIMPLE) {
+            val simple=s.simple
+            NumberControl("右／左の振幅比",simple.ratio,"倍",0.000001..1000000.0,vm::stop,slider=false,digits=4,step=0.01) {v->vm.ratioDb(20*log10(v))}
+            NumberControl("右／左の振幅比",simple.ratioDb,"dB",-72.0..72.0,vm::stop,slider=false,step=0.1,change=vm::ratioDb)
+            Text("左右ゲインと連動。左を変えても共通音量を再正規化しません。0振幅はミュートを使用。",fontSize=11.sp)
+            Text("${if(src.kind==SourceKind.SINE) "位相差" else "基準周波数 ${fmt(simple.referenceHz)} Hzでの位相差"} ${fmt(simple.phaseAt(if(src.kind==SourceKind.SINE) src.frequency else simple.referenceHz,src.kind==SourceKind.SINE))}°（右−左・正は右が進む）")
+        } else {
+            Text("FIR: 左 ${firName(s.processing.left.fir.mode)} / 右 ${firName(s.processing.right.fir.mode)} / ${p.length} taps")
+            Text(vm.calibrationStatus(),fontSize=12.sp)
+            if(s.calibration!=null && s.processing!=s.calibration!!.applied) TextButton(onClick=vm::restoreMeasuredFir) {Text("測定時のFIR設定を復元")}
+            TextButton(onClick={vm.tab=1}) {Text("FIR編集へ")}
+        }
         Row {
             FilterChip(src.kind==SourceKind.SINE,{vm.source {it.copy(kind=SourceKind.SINE)}},label={Text("正弦波")},modifier=Modifier.heightIn(min=48.dp))
             Spacer(Modifier.width(8.dp))
@@ -226,13 +253,18 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
             FilterChip(selected=src.kind==kind,onClick={vm.source {it.copy(kind=kind)}},label={Text(sourceName(kind))},modifier=Modifier.padding(end=4.dp).heightIn(min=48.dp))
         } }
         if(src.kind==SourceKind.SINE) {
-            NumberControl("右の位相 − 左の位相",p.phaseDeg,"°",-180.0..180.0,vm::stop,digits=0,step=1.0) {v ->vm.processing {it.copy(phaseDeg=v)}}
+            NumberControl("発振器の位相差（右−左）",p.phaseDeg,"°",-180.0..180.0,vm::stop,digits=0,step=1.0) {v ->vm.processing {it.copy(phaseDeg=v)}}
             FlowRow {listOf(-90,0,90,180).forEach {v ->OutlinedButton(onClick={vm.processing {it.copy(phaseDeg=v.toDouble())}}) {Text("$v°")}}}
             NumberControl("周波数",src.frequency,"Hz",20.0..20000.0,vm::stop,slider=false,digits=0,step=1.0) {v ->vm.source {it.copy(frequency=v)}}
             Row(Modifier.horizontalScroll(rememberScrollState())) {listOf(250,500,1000,1143,2000,4000).forEach {hz ->TextButton(onClick={vm.source {it.copy(frequency=hz.toDouble())}}) {Text("$hz Hz")}}}
-            Text("発振器 ${fmt(p.phaseDeg,0)}° / 処理全体 ${fmt(vm.totalPhase)}°",fontSize=12.sp)
+            Text("実効位相差 ${fmt(vm.totalPhase)}° / 発振器 ${fmt(p.phaseDeg,0)}°",fontSize=12.sp)
             Text("発振器の同相・逆相設定です。FIR・遅延を含む出力は上の全体位相差で確認します。",fontSize=12.sp)
         } else {
+            if(s.correctionMode==CorrectionMode.SIMPLE) {
+                NumberControl("基準周波数",s.simple.referenceHz,"Hz",20.0..20000.0,vm::stop,slider=false,step=1.0,change=vm::referenceHz)
+                NumberControl("${fmt(s.simple.referenceHz)} Hzでの位相差（右−左）",s.simple.phaseAt(s.simple.referenceHz,false),"°",-100000.0..100000.0,vm::stop,slider=false,step=1.0,change=vm::broadbandPhase)
+                Text("遅延による位相 −360 f Δt + 極性 ${fmt(s.simple.polarityDeg,0)}°。基準周波数の変更で遅延は変わりません。",fontSize=11.sp)
+            }
             NumberControl("左右の時間差 Δt",p.delayUs,"µs",-1000.0..1000.0,vm::stop,digits=0,step=1.0) {v ->vm.processing {it.copy(delayUs=v)}}
             Text("− 左が遅れる   ／   ＋ 右が遅れる",fontSize=12.sp)
             Text("Δt = 右の追加遅延 − 左の追加遅延\n幾何学的な目安 ±${fmt(s.spacingMm/s.soundSpeed*1000)} µs",fontSize=12.sp)
@@ -299,8 +331,8 @@ fun firName(m: FirMode) = when(m) {FirMode.FLAT->"フラット";FirMode.EQ->"グ
                 Toggle("左右同時編集",vm.linked) {vm.linked=it}
                 Text("有効化だけでは設定をコピーしません。",fontSize=11.sp)
                 Toggle("FIR有効",vm.channel().enabled) {v ->
-                    if(vm.linked) vm.processing {it.copy(left=it.left.copy(enabled=v),right=it.right.copy(enabled=v))}
-                    else vm.channel(vm.sideRight) {it.copy(enabled=v)}
+                    if(vm.linked) vm.firProcessing {it.copy(left=it.left.copy(enabled=v),right=it.right.copy(enabled=v))}
+                    else vm.firChannel(vm.sideRight) {it.copy(enabled=v)}
                 }
                 FlowRow {FirMode.entries.forEach {mode ->FilterChip(vm.draft.mode==mode,{vm.editFir {it.copy(mode=mode)}},label={Text(firName(mode))},modifier=Modifier.heightIn(min=48.dp))}}
                 Text("FIR長（停止中のみ）")
@@ -374,7 +406,15 @@ fun firName(m: FirMode) = when(m) {FirMode.FLAT->"フラット";FirMode.EQ->"グ
         if(vm.audio.playing && vm.audio.generation!=vm.generation) Text("設定切替中・非定常。グラフは直前の適用済み設定です。",color=RightOrange)
         Text("同一無指向性2音源・自由空間・遠方界。選択した1周波数の前方パターンです。後方・反射・筐体は評価対象外です。",fontSize=13.sp)
         FlowRow {
-            NumberControl("音源間隔",vm.session.spacingMm,"mm",0.0..3000.0,vm::stop,slider=false) {v->vm.update {it.copy(spacingMm=v)}}
+            if(vm.session.externalOutput) {
+                val layout=vm.session.activeLayout
+                Text("外部出力の配置（機器ごとに保存）")
+                if(layout==null) Button(onClick={vm.externalLayout(SpeakerLayout())}) {Text("外部配置を設定（初期値150 mm）")}
+                else {
+                    NumberControl("外部音源間隔",layout.spacingMm,"mm",0.0..3000.0,vm::stop,slider=false) {v->vm.externalLayout(layout.copy(spacingMm=v))}
+                    Toggle("外部配置の向きを反転",layout.reversed) {v->vm.externalLayout(layout.copy(reversed=v))}
+                }
+            } else NumberControl("音源間隔",vm.session.spacingMm,"mm",0.0..3000.0,vm::stop,slider=false) {v->vm.update {it.copy(spacingMm=v)}}
             NumberControl("音速",vm.session.soundSpeed,"m/s",250.0..400.0,vm::stop,slider=false) {v->vm.update {it.copy(soundSpeed=v)}}
             if (vm.session.source.kind == SourceKind.SINE) {
                 Text("評価周波数: ${fmt(vm.session.previewFrequencyHz,0)} Hz（再生周波数に自動追従）",modifier=Modifier.padding(8.dp))
@@ -382,6 +422,7 @@ fun firName(m: FirMode) = when(m) {FirMode.FLAT->"フラット";FirMode.EQ->"グ
                 NumberControl("評価周波数",vm.session.evaluationHz,"Hz",20.0..20000.0,vm::stop,slider=false) {v->vm.update {it.copy(evaluationHz=v)}}
             }
         }
+        if(vm.session.activeLayout==null) Text("外部機器の配置が未設定のため理論パターンは未評価です。")
         Chart(vm.pattern,null,null,-60.0,max(0.0,vm.pattern.maxOrNull() ?: 0.0),"−90° 左  ·  −45°  ·  0° 正面  ·  +45°  ·  +90° 右","相対dB")
         Text("固定参照: 0 dBゲインの2音源が同相加算した振幅2。共通出力ゲインを除外し、最大値では正規化しません。",fontSize=13.sp)
         Text("${sourceName(vm.session.source.kind)} / ${fmt(vm.session.previewFrequencyHz,0)} Hz。${if(vm.session.source.kind==SourceKind.SINE) "発振器の相対位相を含みます。" else "正弦波用の位相設定を含みません。"}",fontSize=13.sp)

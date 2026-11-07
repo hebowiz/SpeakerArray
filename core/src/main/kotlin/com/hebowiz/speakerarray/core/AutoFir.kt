@@ -25,6 +25,13 @@ data class AutoFirSettings(
     }
 }
 
+data class QualityPolicy(val version: String, val snrDb: Double, val gainDb: Double, val phaseDegrees: Double, val coverage: Double) {
+    companion object {
+        val STRICT = QualityPolicy("strict-complex-v1",20.0,1.0,5.0,0.8)
+        val TRIAL = QualityPolicy("trial-power-v1",20.0,2.0,20.0,0.8)
+    }
+}
+
 object MeasurementLimits {
     const val SNR_DB = 20.0
     const val REPEAT_DB = 1.0
@@ -195,7 +202,7 @@ object TransferEstimator {
         require(result.eligible) {result.findings.joinToString {it.message}}
         return result.pair
     }
-    fun assess(left: List<Transfer>, right: List<Transfer>, settings: AutoFirSettings): PairAssessment {
+    fun assess(left: List<Transfer>, right: List<Transfer>, settings: AutoFirSettings, policy: QualityPolicy = QualityPolicy.STRICT): PairAssessment {
         require(left.size>=2 && right.size>=2)
         fun mean(values: List<Transfer>)=Transfer(DoubleArray(SIZE/2+1) {k->values.map {it.re[k]}.average()},
             DoubleArray(SIZE/2+1) {k->values.map {it.im[k]}.average()},DoubleArray(SIZE/2+1) {k->values.minOf {it.snrDb[k]}},
@@ -217,14 +224,14 @@ object TransferEstimator {
                 if(channel==0) {ldb[k]=max(ldb[k],d);lp[k]=max(lp[k],p)} else {rdb[k]=max(rdb[k],d);rp[k]=max(rp[k],p)}
                 db=max(db,d);phase=max(phase,p)
             }
-            if(l.snrDb[k]<MeasurementLimits.SNR_DB) reasons[k]+="LEFT_SNR"
-            if(r.snrDb[k]<MeasurementLimits.SNR_DB) reasons[k]+="RIGHT_SNR"
-            if(ldb[k]>MeasurementLimits.REPEAT_DB) reasons[k]+="LEFT_REPEAT_GAIN"
-            if(rdb[k]>MeasurementLimits.REPEAT_DB) reasons[k]+="RIGHT_REPEAT_GAIN"
-            if(lp[k]>MeasurementLimits.REPEAT_DEGREES) reasons[k]+="LEFT_REPEAT_PHASE"
-            if(rp[k]>MeasurementLimits.REPEAT_DEGREES) reasons[k]+="RIGHT_REPEAT_PHASE"
+            if(l.snrDb[k]<policy.snrDb) reasons[k]+="LEFT_SNR"
+            if(r.snrDb[k]<policy.snrDb) reasons[k]+="RIGHT_SNR"
+            if(ldb[k]>policy.gainDb) reasons[k]+="LEFT_REPEAT_GAIN"
+            if(rdb[k]>policy.gainDb) reasons[k]+="RIGHT_REPEAT_GAIN"
+            if(lp[k]>policy.phaseDegrees) reasons[k]+="LEFT_REPEAT_PHASE"
+            if(rp[k]>policy.phaseDegrees) reasons[k]+="RIGHT_REPEAT_PHASE"
             worstDb=max(worstDb,db); worstPhase=max(worstPhase,phase)
-            if(min(l.snrDb[k],r.snrDb[k]) >= MeasurementLimits.SNR_DB && db<=MeasurementLimits.REPEAT_DB && phase<=MeasurementLimits.REPEAT_DEGREES) {
+            if(min(l.snrDb[k],r.snrDb[k]) >= policy.snrDb && db<=policy.gainDb && phase<=policy.phaseDegrees) {
                 accepted++
                 valid[k]=true
                 val edge=min((hz-settings.lowHz)/(settings.lowHz*0.2),(settings.highHz-hz)/(settings.highHz*0.1)).coerceIn(0.0,1.0)
@@ -239,7 +246,7 @@ object TransferEstimator {
         }
         val suggestion=if(bestLength>=20) BandSuggestion(ceil(bestStart*SAMPLE_RATE.toDouble()/SIZE),
             floor((bestStart+bestLength-1)*SAMPLE_RATE.toDouble()/SIZE)) else null
-        val findings=if(coverage>=MeasurementLimits.MIN_COVERAGE) emptyList() else listOf(Finding("BAND_QUALITY",Verdict.INSUFFICIENT,
+        val findings=if(coverage>=policy.coverage) emptyList() else listOf(Finding("BAND_QUALITY",Verdict.INSUFFICIENT,
             "品質不足: 有効ビン ${round(coverage*1000)/10}%、反復最大 ${round(worstDb*10)/10} dB / ${round(worstPhase*10)/10}°"))
         return PairAssessment(MeasuredPair(l,r,weights,coverage,worstDb,worstPhase),FrequencyQuality(ldb,rdb,lp,rp,reasons,valid,suggestion),findings)
     }
@@ -325,6 +332,28 @@ object MeasurementQuality {
         val assessment=assessVerification(single,both,corrected,weights)
         require(assessment.passed) {assessment.findings.joinToString {it.message}}
         return assessment.result!!
+    }
+    /** Fixed-mask worst observed envelope across fresh repeats, plus measured noise energy.
+     * No independence or Gaussian confidence claim. Raw point estimates remain separate.
+     */
+    fun conservative(single: List<Transfer>, both: List<Transfer>, corrected: List<Transfer>, weights: DoubleArray): VerificationAssessment {
+        require(single.size>=4 && both.size>=2 && corrected.size>=2)
+        fun envelope(values: List<Transfer>, upper: Boolean): Transfer {
+            val t=values.first()
+            return t.copy(recordedPower=DoubleArray(t.re.size) {k->
+                val powers=values.map {v->
+                    val noise=v.recordedPower[k]*10.0.pow(-v.snrDb[k]/10).coerceAtMost(1.0)
+                    if(upper) v.recordedPower[k]+noise else (v.recordedPower[k]-noise).coerceAtLeast(0.0)
+                }
+                if(upper) powers.max() else powers.min()
+            },snrDb=DoubleArray(t.re.size) {k->values.minOf {it.snrDb[k]}})
+        }
+        val result=assessVerification(envelope(single,false),envelope(both,false),envelope(corrected,true),weights)
+        val stable=listOf(single,both).all {group->weights.indices.filter {weights[it]>0}.all {k->
+            val max=group.maxOf {it.recordedPower[k]};val min=group.minOf {it.recordedPower[k]}
+            min>0 && 10*log10(max/min)<=QualityPolicy.TRIAL.gainDb
+        }}
+        return if(stable) result else result.copy(findings=result.findings+Finding("RECORDING_LEVEL_UNSTABLE",Verdict.INSUFFICIENT,"録音レベル不安定: 固定ビンの基準電力変動が2 dBを超えました"))
     }
     fun assessVerification(single: Transfer, both: Transfer, corrected: Transfer, weights: DoubleArray): VerificationAssessment {
         val valid=weights.indices.filter {weights[it]>0}

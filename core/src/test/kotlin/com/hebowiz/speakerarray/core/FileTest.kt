@@ -97,7 +97,7 @@ class FileTest {
     }
     @Test fun unknownVersionSampleRateAndWrongTypeRejected() {
         val text=SessionRepository.encode(Session())
-        listOf(text.replace("\"schemaVersion\": 2","\"schemaVersion\": 999"),text.replace("48000","44100"),text.replace("speakerarray-session","speakerarray-fir")).forEach {raw ->
+        listOf(org.json.JSONObject(text).put("schemaVersion",999).toString(),text.replace("48000","44100"),text.replace("speakerarray-session","speakerarray-fir")).forEach {raw ->
             assertThrows(IllegalArgumentException::class.java) {SessionRepository.decode(raw)}
         }
     }

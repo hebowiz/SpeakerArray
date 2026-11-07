@@ -6,7 +6,7 @@ data class CalibrationProfile(val generation: Long, val settings: AutoFirSetting
     val swapped: Boolean, val volumeIndex: Int, val mode: Int, val hfp: Boolean,
     val applied: Processing, val backup: String, val resultJson: String) {
     fun matches(s: Session, volume: Int) = s.masterDb==masterDb && s.swapped==swapped && volume==volumeIndex &&
-        s.processing==applied && s.autoFir==settings
+        s.correctionMode==CorrectionMode.FIR && s.processing==applied && s.autoFir==settings
 }
 
 object CalibrationRepository {

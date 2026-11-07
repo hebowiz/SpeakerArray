@@ -20,6 +20,7 @@ object MeasurementResultStore {
     }
     fun array(v: DoubleArray)=JSONArray(v.map {if(it.isFinite()) it else JSONObject.NULL})
     fun findings(v: List<Finding>)=JSONArray(v.map {JSONObject().put("code",it.code).put("verdict",it.verdict.name).put("message",it.message)})
+    fun policy(p: QualityPolicy)=JSONObject().put("version",p.version).put("snrDb",p.snrDb).put("gainDb",p.gainDb).put("phaseDegrees",p.phaseDegrees).put("coverage",p.coverage)
     fun thresholds()=JSONObject().put("methodVersion",SyncPolicy.VERSION).put("snrDb",MeasurementLimits.SNR_DB)
         .put("repeatDb",MeasurementLimits.REPEAT_DB).put("repeatPhaseDeg",MeasurementLimits.REPEAT_DEGREES)
         .put("coverage",MeasurementLimits.MIN_COVERAGE).put("improvementDb",MeasurementLimits.IMPROVEMENT_DB)

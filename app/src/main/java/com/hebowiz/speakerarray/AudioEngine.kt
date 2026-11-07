@@ -32,17 +32,23 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     val isRunning get() = worker != null || retainedActive
     private var routeId: Int? = null
     private var routeName = "出力先を確認中"
-    fun submit(p: PreparedProcessing) { dsp?.submit(p) }
+    @Volatile var soloSide: Boolean? = null
+    fun submit(p: PreparedProcessing) {
+        if(stopRequested && isRunning) return
+        check(CalibrationPlaybackPolicy.peakBound(p.parameters,settings.masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
+        dsp?.submit(p)
+    }
     fun seek(fraction: Double) { wav?.seek(fraction) }
     fun start(prepared: PreparedProcessing, wavFile: File?) {
         if (isRunning) return
+        check(CalibrationPlaybackPolicy.peakBound(prepared.parameters,settings.masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
         if (manager.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             report(AudioStatus(message="音声フォーカスを取得できません")); return
         }
         val initial = settings
         stopRequested = false; reason = "停止"
         val engine = DspEngine(prepared); dsp = engine
-        report(AudioStatus(playing=true,generation=prepared.generation,message="再生準備中"))
+        report(AudioStatus(playing=true,switching=engine.switching,generation=engine.appliedGeneration,message="再生準備中"))
         worker = Thread({ run(initial, engine, wavFile) }, "SpeakerArray-audio").also { it.start() }
     }
     fun stop(message: String = "停止") { reason = message; stopRequested = true }
@@ -50,9 +56,13 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     fun startRetained(prepared: PreparedProcessing, wavFile: File?, port: MeasurementAudio) {
         if(isRunning) return
         port.check()
-        val initial=settings;val profile=requireNotNull(initial.calibration)
-        check(CalibrationPlaybackPolicy.matches(profile,initial,port.volumeIndex,port.mode,true)) {"校正条件が一致しません"}
-        check(prepared.parameters==profile.applied) {"検証済み係数と再生係数が異なります"}
+        val initial=settings;val profile=initial.calibration
+        check(initial.autoFir==port.settings) {"測定の共通条件が一致しません"}
+        if(initial.correctionMode==CorrectionMode.FIR && profile!=null) {
+            check(CalibrationPlaybackPolicy.matches(profile,initial,port.volumeIndex,port.mode,true)) {"校正条件が一致しません"}
+            check(prepared.parameters==profile.applied.withSolo(soloSide)) {"検証済み係数と再生係数が異なります"}
+        }
+        check(CalibrationPlaybackPolicy.peakBound(prepared.parameters,initial.masterDb)<=0.9) {"出力ピーク上限を超えます。共通出力を下げてください"}
         check(manager.requestAudioFocus(focus)==AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {"音声フォーカスを取得できません"}
         val fileSource=if(initial.source.kind==SourceKind.WAV) WavSource(requireNotNull(wavFile),initial.source.loop,initial.source.loopFade) else null
         val source=SourceEngine(initial.source,fileSource)
@@ -67,10 +77,10 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
         }
         try {
             port.beginPlayback({out ->
-                check(settings.processing==profile.applied && settings.masterDb==profile.masterDb && settings.swapped==profile.swapped) {"校正処理が変更されました"}
+                check((settings.correctionMode!=CorrectionMode.FIR || profile==null || CalibrationPlaybackPolicy.matches(profile,settings,port.volumeIndex,port.mode,true)) && settings.masterDb==initial.masterDb && settings.swapped==initial.swapped && settings.autoFir==initial.autoFir) {"校正処理が変更されました"}
                 port.check()
                 if(stopRequested && gain<=0) {finish(reason);false} else {
-                    source.render(l,r,settings.source.frequency,0.0)
+                    source.render(l,r,settings.source.frequency,0.0,quadrature=prepared.sineQuadrature)
                     check(fileSource?.error==null) {"WAV読込エラー"}
                     check((l.asSequence()+r.asSequence()).all {it.isFinite() && abs(it)<=1.0}) {"音源ピークが検証範囲を超えました"}
                     engine.process(l,r,out,initial.masterDb,initial.swapped)
@@ -82,9 +92,9 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
                     if(source.finished) stop("音源終了・停止")
                     if(System.nanoTime()-lastReport>100_000_000L) {
                         lastReport=System.nanoTime()
-                        val status=AudioStatus(playing=true,generation=prepared.generation,
+                        val status=AudioStatus(playing=true,switching=engine.switching,generation=engine.appliedGeneration,
                             leftDb=levelDb(l.maxOf {abs(it)}),rightDb=levelDb(r.maxOf {abs(it)}),
-                            route=port.state().actual,message="検証と同一ストリームで再生（任意音源の効果は未評価）")
+                            route=port.state().actual,message=if(settings.correctionMode==CorrectionMode.SIMPLE) "位相・振幅（効果未検証）・測定経路維持中" else "検証と同一ストリームで再生（任意音源の効果は未評価）")
                         main.post {report(status)}
                     }
                     true
@@ -99,7 +109,7 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
         val routing = AudioRouting.OnRoutingChangedListener { routing ->
             val device = routing.routedDevice ?: return@OnRoutingChangedListener
             val old = routeId; routeId = device.id
-            routeName = "${device.productName} (${routeType(device.type)})"
+            routeName = device.description()
             if (old != null && old != device.id) { stop("出力先変更・停止"); routeChanged() }
         }
         try {
@@ -133,11 +143,13 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
                 check(track.routedDevice?.id==requested.id) { "出力先不一致・停止" }
                 val begin = System.nanoTime()
                 val s = settings
-                source.render(left, right, s.source.frequency, s.processing.phaseDeg)
+                source.render(left, right, s.source.frequency, 0.0, quadrature=initial.source.kind==SourceKind.SINE)
+                check(left.indices.all {left[it].isFinite() && right[it].isFinite() && abs(left[it])<=1.0 && abs(right[it])<=1.0}) {"音源ピークが1を超えています。音源の振幅を下げてください"}
                 if (source.finished) stop("音源終了・停止")
                 if (fileSource?.error != null) error(fileSource.error!!)
                 for (i in envelope.indices) { gain = (gain+(if (stopRequested) -1 else 1)/480.0).coerceIn(0.0, 1.0); envelope[i] = gain }
                 engine.process(left, right, out, s.masterDb, s.swapped, envelope)
+                check(engine.clips==0L) {"出力ピーク上限を超えました。共通出力を下げてください"}
                 peakL = max(peakL, engine.peakLeft); peakR = max(peakR, engine.peakRight)
                 worstCpu = max(worstCpu, (System.nanoTime()-begin).toDouble()/(BLOCK*1e9/SAMPLE_RATE)*100)
                 val audioTrack = track
@@ -164,13 +176,5 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
             manager.abandonAudioFocusRequest(focus)
         }
         main.post { worker = null; report(lastStatus.copy(playing=false,switching=false,leftDb=-120.0,rightDb=-120.0,generation=engine.appliedGeneration, clips=engine.clips, route="$routeName（停止中・前回）", message=finalMessage)) }
-    }
-    private fun routeType(type: Int) = when(type) {
-        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "内蔵スピーカー"
-        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "受話口"
-        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth"
-        AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
-        AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "イヤホン"
-        else -> "type=$type"
     }
 }

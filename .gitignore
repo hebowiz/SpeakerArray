@@ -36,3 +36,7 @@ Thumbs.db
 Desktop.ini
 
 # Gradle wrapper files, including gradle-wrapper.jar, must be committed.
+
+# Offline diagnostic analysis caches
+__pycache__/
+*.pyc

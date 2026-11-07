@@ -8,9 +8,9 @@ private const val HISTORY = FFT_SIZE-BLOCK
 private const val FADE_SAMPLES = 1440
 
 data class Spectrum(val re: DoubleArray, val im: DoubleArray)
-data class PreparedProcessing(val parameters: Processing, val left: Spectrum, val right: Spectrum, val generation: Long) {
+data class PreparedProcessing(val parameters: Processing, val left: Spectrum, val right: Spectrum, val generation: Long, val sineQuadrature: Boolean = false) {
     companion object {
-        fun create(p: Processing, generation: Long = 0): PreparedProcessing {
+        fun create(p: Processing, generation: Long = 0, sineQuadrature: Boolean = false): PreparedProcessing {
             p.validate()
             fun make(ch: Channel, right: Boolean): Spectrum {
                 val fir = if (ch.enabled) FirDesigner.design(ch.fir, p.length) else FirDesigner.flat(p.length)
@@ -21,7 +21,7 @@ data class PreparedProcessing(val parameters: Processing, val left: Spectrum, va
                 Fft.transform(re, im)
                 return Spectrum(re, im)
             }
-            return PreparedProcessing(p, make(p.left, false), make(p.right, true), generation)
+            return PreparedProcessing(p, make(p.left, false), make(p.right, true), generation, sineQuadrature)
         }
     }
 }
@@ -36,6 +36,8 @@ class DspEngine(initial: PreparedProcessing) {
     private val historyR = DoubleArray(FFT_SIZE)
     private val inputRe = DoubleArray(FFT_SIZE)
     private val inputIm = DoubleArray(FFT_SIZE)
+    private val rightRe = DoubleArray(FFT_SIZE)
+    private val rightIm = DoubleArray(FFT_SIZE)
     private val workRe = DoubleArray(FFT_SIZE)
     private val workIm = DoubleArray(FFT_SIZE)
     private val oldL = DoubleArray(BLOCK)
@@ -50,29 +52,32 @@ class DspEngine(initial: PreparedProcessing) {
     private var master = 0.0
     fun submit(value: PreparedProcessing) { pending.set(value) }
 
-    private fun convolve(history: DoubleArray, input: DoubleArray, old: Spectrum, fresh: Spectrum?, out: DoubleArray, alternate: DoubleArray) {
+    private fun transform(history: DoubleArray, input: DoubleArray, re: DoubleArray, im: DoubleArray) {
         System.arraycopy(history, BLOCK, history, 0, HISTORY)
         System.arraycopy(input, 0, history, HISTORY, BLOCK)
-        System.arraycopy(history, 0, inputRe, 0, FFT_SIZE); inputIm.fill(0.0)
-        Fft.transform(inputRe, inputIm)
-        fun run(spectrum: Spectrum, dest: DoubleArray) {
-            for (i in 0 until FFT_SIZE) {
-                workRe[i] = inputRe[i]*spectrum.re[i]-inputIm[i]*spectrum.im[i]
-                workIm[i] = inputRe[i]*spectrum.im[i]+inputIm[i]*spectrum.re[i]
-            }
-            Fft.transform(workRe, workIm, true)
-            System.arraycopy(workRe, HISTORY, dest, 0, BLOCK)
+        System.arraycopy(history, 0, re, 0, FFT_SIZE);im.fill(0.0)
+        Fft.transform(re,im)
+    }
+    private fun convolve(p: PreparedProcessing, right: Boolean, dest: DoubleArray) {
+        val h=if(right) p.right else p.left
+        val angle=p.parameters.phaseDeg*PI/180
+        val c=cos(angle);val s=sin(angle)
+        for(i in 0 until FFT_SIZE) {
+            val re=if(!right) inputRe[i] else if(p.sineQuadrature) inputRe[i]*c+rightRe[i]*s else rightRe[i]
+            val im=if(!right) inputIm[i] else if(p.sineQuadrature) inputIm[i]*c+rightIm[i]*s else rightIm[i]
+            workRe[i]=re*h.re[i]-im*h.im[i];workIm[i]=re*h.im[i]+im*h.re[i]
         }
-        run(old, out)
-        if (fresh != null) run(fresh, alternate)
+        Fft.transform(workRe,workIm,true)
+        System.arraycopy(workRe,HISTORY,dest,0,BLOCK)
     }
     fun process(left: DoubleArray, right: DoubleArray, output: FloatArray, masterDb: Double, swapped: Boolean, envelope: DoubleArray? = null) {
         require(left.size == BLOCK && right.size == BLOCK && output.size == 2*BLOCK)
         if (next == null) pending.getAndSet(null)?.let { next = it; fade = 0 }
         val target = next
         switching = target != null || pending.get() != null
-        convolve(historyL, left, current.left, target?.left, oldL, newL)
-        convolve(historyR, right, current.right, target?.right, oldR, newR)
+        transform(historyL,left,inputRe,inputIm);transform(historyR,right,rightRe,rightIm)
+        convolve(current,false,oldL);convolve(current,true,oldR)
+        if(target!=null) {convolve(target,false,newL);convolve(target,true,newR)}
         val targetMaster = dbGain(masterDb)
         peakLeft = 0.0; peakRight = 0.0
         for (i in 0 until BLOCK) {

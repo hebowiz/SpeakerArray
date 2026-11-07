@@ -6,10 +6,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.hebowiz.speakerarray.core.EndpointKey
+import com.hebowiz.speakerarray.core.RoutePolicy
 import java.io.Closeable
 
 fun AudioDeviceInfo.key() = EndpointKey(type,productName.toString(),if(Build.VERSION.SDK_INT>=28) address else "")
-fun AudioDeviceInfo.description() = "${productName} / type=$type / id=$id"
+fun AudioDeviceInfo.description() = "${if(isSource && RoutePolicy.bluetooth(type)) "Bluetooth MIC" else RoutePolicy.label(type)}: ${productName} / type=$type / id=$id"
 
 class DeviceRoutes(context: Context, private val changed: () -> Unit) : Closeable {
     val manager: AudioManager = context.getSystemService(AudioManager::class.java)

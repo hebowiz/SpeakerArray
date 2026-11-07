@@ -11,7 +11,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 
 enum class AutoStage(val label: String) {
-    IDLE("待機"), ROUTING("経路確認"), MEASURING("測定中"), ANALYZING("同期・品質解析"), DESIGNING("設計中"),
+    IDLE("未測定"), ROUTING("経路確認"), MEASURING("測定中"), SEARCHING("探索中"), ANALYZING("同期・品質解析"), DESIGNING("設計中"),
     TRIAL("試験適用"), VERIFYING("効果確認"), APPLIED("適用完了"), REJECTED("品質不足・未反映"), CANCELLED("取消・未反映")
 }
 data class AutoProgress(val stage: AutoStage=AutoStage.IDLE, val fraction: Float=0f, val detail: String="")
@@ -142,7 +142,10 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
         if(!initialSync.analyzable) return@withTimeout reject("SYNC_ABORT",initialSync.findings.joinToString {it.message})
         val left=shots.filter {it.tag=="L"}.map {transfer(pcm,initialSync.fit,it,noise)}
         val right=shots.filter {it.tag=="R"}.map {transfer(pcm,initialSync.fit,it,noise)}
-        val quality=TransferEstimator.assess(left,right,config);val pair=quality.pair
+        val strict=TransferEstimator.assess(left,right,config,QualityPolicy.STRICT)
+        val quality=TransferEstimator.assess(left,right,config,QualityPolicy.TRIAL);val pair=quality.pair
+        diagnostics.put("strictQuality",MeasurementResultStore.pair(strict)).put("trialPolicy",MeasurementResultStore.policy(QualityPolicy.TRIAL))
+            .put("strictPolicy",MeasurementResultStore.policy(QualityPolicy.STRICT))
         diagnostics.put("quality",MeasurementResultStore.pair(quality)).put("initialTransfers",JSONArray((left+right).map {MeasurementResultStore.transfer(it)}))
         MeasurementQuality.distinctChannels(pair)?.let {warnings+=it};publish()
         if(!quality.eligible) return@withTimeout reject("BAND_QUALITY",quality.findings.joinToString {it.message})
@@ -173,10 +176,10 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
             val transfers=shots.map {transfer(pcm,finalSync.fit,it,noise)}
             diagnostics.put(kind+"Transfers",JSONArray(transfers.map {MeasurementResultStore.transfer(it)}));publish()
             val baselines=shots.indices.filter {shots[it].tag.startsWith("single")}.map {transfers[it]}
-            val stability=TransferEstimator.assess(listOf(reference)+baselines.map {unDelay(it)},listOf(reference)+baselines.map {unDelay(it)},config)
+            val stability=TransferEstimator.assess(listOf(reference)+baselines.map {unDelay(it)},listOf(reference)+baselines.map {unDelay(it)},config,QualityPolicy.TRIAL)
             diagnostics.put(kind+"ReferenceStability",MeasurementResultStore.pair(stability))
             val bothTransfers=shots.indices.filter {shots[it].tag=="both"}.map {transfers[it]}
-            val bothStability=TransferEstimator.assess(bothTransfers,bothTransfers,config)
+            val bothStability=TransferEstimator.assess(bothTransfers,bothTransfers,config,QualityPolicy.TRIAL)
             diagnostics.put(kind+"BothStability",MeasurementResultStore.pair(bothStability))
             val preserved=mask.indices.all {mask[it]<=0 || (stability.quality.valid[it] && bothStability.quality.valid[it])}
             val local=mutableListOf<VerificationAssessment>()
@@ -187,7 +190,12 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
                 verificationJson.put(JSONObject().put("signal",kind).put("repeat",repeat+1).put("assessment",MeasurementResultStore.verification(v)))
                 v.result?.let {verification+=it};finalSingle=s;finalBoth=b;finalCorrected=c
             }
+            val correctedTransfers=shots.indices.filter {shots[it].tag=="corrected"}.map {transfers[it]}
+            val conservative=MeasurementQuality.conservative(baselines,bothTransfers,correctedTransfers,mask)
+            diagnostics.put(kind+"Conservative",MeasurementResultStore.verification(conservative))
+                .put("powerPolicy","fixed-mask-observed-envelope-plus-noise-v1")
             diagnostics.put("verification",verificationJson);publish()
+            if(!conservative.passed) return@withTimeout reject("POWER_COMPARISON",conservative.findings.joinToString {it.message})
             if(!preserved) return@withTimeout reject("REFERENCE_CHANGED","前後基準の反復性が固定評価ビンで失われました。MIC位置・AGC等を確認してください")
             if(!finalSync.reliable) return@withTimeout reject("VERIFY_SYNC_CONFIDENCE","効果確認中の同期信頼度が不足しています")
             if(local.any {!it.passed}) return@withTimeout reject("INSUFFICIENT_REDUCTION",local.flatMap {it.findings}.joinToString {it.message})

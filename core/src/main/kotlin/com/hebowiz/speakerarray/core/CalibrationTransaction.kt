@@ -11,7 +11,7 @@ class CalibrationTransaction(val original: Session, val generation: Long) {
             it.reductionSingleDb>=MeasurementLimits.IMPROVEMENT_DB && it.reductionBothDb>=MeasurementLimits.IMPROVEMENT_DB &&
                 it.bandReduction.isNotEmpty() && it.bandReduction.all {v->v>=-MeasurementLimits.MAX_WORSENING_DB}
         }) {"再測定の品質基準を満たしていません"}
-        val next=original.copy(processing=profile.applied,autoFir=profile.settings,calibration=profile,
+        val next=original.copy(correctionMode=CorrectionMode.FIR,processing=profile.applied,autoFir=profile.settings,calibration=profile,
             a=if(original.processing.length==profile.applied.length) original.a else null,
             b=if(original.processing.length==profile.applied.length) original.b else null)
         next.validate();ended=true;return next

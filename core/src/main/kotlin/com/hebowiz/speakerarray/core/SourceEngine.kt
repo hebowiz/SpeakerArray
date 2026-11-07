@@ -16,7 +16,7 @@ class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = n
     private val wavBlock = DoubleArray(BLOCK)
     var finished = false; private set
     init { settings.validate() }
-    fun render(left: DoubleArray, right: DoubleArray, targetHz: Double, targetPhaseDeg: Double) {
+    fun render(left: DoubleArray, right: DoubleArray, targetHz: Double, targetPhaseDeg: Double, quadrature: Boolean = false) {
         if (settings.kind == SourceKind.WAV) { wav?.read(wavBlock); finished = wav?.finished ?: true }
         for (i in 0 until BLOCK) {
             frequency += (targetHz-frequency)/240.0
@@ -46,7 +46,7 @@ class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = n
                 SourceKind.WAV -> wavBlock[i]
             }
             left[i] = sample
-            right[i] = if (settings.kind == SourceKind.SINE) sin(phase+relative) else sample
+            right[i] = if (settings.kind == SourceKind.SINE) if(quadrature) cos(phase) else sin(phase+relative) else sample
             phase = (phase+2*PI*frequency/SAMPLE_RATE)%(2*PI)
             elapsed++
         }

@@ -62,7 +62,7 @@ class AppTest {
                     rule.onNodeWithText(tab).performScrollTo().performClick()
                     rule.onNodeWithContentDescription("常設の停止").assertIsDisplayed()
                     if(tab=="フィルタ自動設計") {
-                        rule.onNodeWithText("測定・設計・適用").assertIsDisplayed()
+                        rule.onNodeWithText("自動調整").assertIsDisplayed()
                         rule.onNodeWithText("取消").assertIsDisplayed()
                     }
                     Thread.sleep(350)

@@ -86,8 +86,13 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
             inputDb,clips,effectInfo,captureFrames.toLong())
     }
     private fun publish() {val value=state();report(value)}
-    private fun routesMatch()=track?.routedDevice?.id==output.id && record?.routedDevice?.id==input.id
+    private fun routesMatch(): Boolean {
+        val out=track?.routedDevice ?: return false
+        val mic=record?.routedDevice ?: return false
+        return RoutePolicy.reason(out.type,mic.type)==null && out.id==output.id && mic.id==input.id
+    }
     suspend fun open() {
+        RoutePolicy.requireAllowed(output.type,input.type)
         check(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED) { "MIC権限が必要です" }
         if(communication.hfp && Build.VERSION.SDK_INT>=31) check(context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED) { "Bluetooth権限が必要です" }
         check(manager.requestAudioFocus(focus)==AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "音声フォーカスを取得できません" }
@@ -136,6 +141,8 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         while(true) {
             write(FloatArray(BLOCK*2))
             val now=System.nanoTime()
+            val actualOut=t.routedDevice;val actualIn=r.routedDevice
+            if(actualOut!=null && actualIn!=null) RoutePolicy.requireAllowed(actualOut.type,actualIn.type)
             if(routesMatch()) {if(matchingSince==0L) matchingSince=now;if(now-matchingSince>300_000_000L && captureFrames>0) break} else matchingSince=0
             if(now>streamDeadline) {publish();error("この端末では指定した入出力の同時使用を確認できない: ${state().actual}")}
         }
@@ -214,6 +221,12 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
     suspend fun silence(seconds: Double) {repeat(ceil(seconds*SAMPLE_RATE/BLOCK).toInt()) {write(FloatArray(BLOCK*2))}}
     fun snapshot(): DoubleArray = synchronized(captureLock) {check();val count=captureFrames-captureOriginFrames;val data=checkNotNull(capture);DoubleArray(count) {data[it].toDouble()}}
     fun discardCaptured() = synchronized(captureLock) {check();captureOriginFrames=captureFrames}
+    val capturedFrames get() = captureFrames.toLong()
+    fun captureRange(from: Long, count: Int): DoubleArray = synchronized(captureLock) {
+        check();require(from>=captureOriginFrames && from+count<=captureFrames) {"録音フレーム範囲不足"}
+        val data=checkNotNull(capture);val offset=(from-captureOriginFrames).toInt()
+        DoubleArray(count) {data[offset+it].toDouble()}
+    }
     fun beginPlayback(render: (FloatArray)->Boolean, failed: (String)->Unit) {
         check();check(playback==null);playbackFailure=failed;playback=render
     }

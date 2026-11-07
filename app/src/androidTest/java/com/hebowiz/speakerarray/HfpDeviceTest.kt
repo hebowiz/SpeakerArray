@@ -21,6 +21,55 @@ import kotlinx.coroutines.withContext
 /** Explicit opt-in only: never run acoustic hardware checks in the ordinary regression suite. */
 @RunWith(AndroidJUnit4::class)
 class HfpDeviceTest {
+    @Test fun authorizedBuiltinCorrectionSwitch() = runBlocking<Unit> {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("correctionPlayback")=="true")
+        val context=InstrumentationRegistry.getInstrumentation().targetContext
+        val trace=StringBuilder()
+        ActivityScenario.launch(MainActivity::class.java).use {scenario ->
+            lateinit var vm: AppViewModel
+            lateinit var original: Session
+            scenario.onActivity {activity ->
+                vm=ViewModelProvider(activity)[AppViewModel::class.java];original=vm.session
+                check(!vm.autoBusy && !vm.maintainingRoute)
+                check(vm.routes.resolve(original.autoFir.output,false).type==AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+                vm.stop();vm.dismissMessage();vm.tab=0
+            }
+            val volume=context.getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_MUSIC)
+            try {
+                // A known bounded comparison fixture. Restored in full, including calibration and both slots.
+                scenario.onActivity {vm.update {it.copy(masterDb=-24.0,calibration=null,correctionMode=CorrectionMode.FIR,
+                    source=it.source.copy(kind=SourceKind.SINE),processing=Processing(length=it.processing.length,right=Channel(gainDb=-6.0)),
+                    simple=SimpleCorrection(right=Channel(gainDb=-6.0),sinePhaseDeg=-90.0,referenceHz=it.source.frequency))}}
+                delay(800);scenario.onActivity {vm.start()}
+                withTimeout(8000) {while(!vm.audio.playing || !vm.audio.route.contains("type=2")) delay(50)}
+                val thread=Thread.getAllStackTraces().keys.single {it.name=="SpeakerArray-audio"}
+                val route=vm.audio.route
+                repeat(5) {i ->
+                    scenario.onActivity {vm.correction(if(i%2==0) CorrectionMode.SIMPLE else CorrectionMode.FIR)}
+                    delay(3200)
+                    check(vm.audio.playing && vm.audio.generation==vm.generation && !vm.audio.switching) {vm.audio.message}
+                    trace.appendLine("expectedRoute=$route, actualRoute=${vm.audio.route}, clips=${vm.audio.clips}, mode=${vm.session.correctionMode}")
+                    check(vm.audio.clips==0L) {"clips=${vm.audio.clips}"};check(vm.audio.route==route) {"expected $route, actual ${vm.audio.route}"}
+                    check(Thread.getAllStackTraces().keys.single {it.name=="SpeakerArray-audio"}===thread)
+                    trace.appendLine("mode=${vm.session.correctionMode}, applied=${vm.appliedMode}, route=$route, generation=${vm.audio.generation}, clips=${vm.audio.clips}, underruns=${vm.audio.underruns}")
+                }
+                check(context.getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_MUSIC)==volume)
+                val image=InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+                File(context.getExternalFilesDir(null),"correction-switch.png").outputStream().use {image.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)}
+            } finally {
+                scenario.onActivity {vm.stop()}
+                withContext(NonCancellable) {
+                    withTimeout(5000) {while(vm.engine.isRunning) delay(30)}
+                    scenario.onActivity {vm.update {original};vm.persist()}
+                    delay(600)
+                    val prefs=context.getSharedPreferences("session",android.content.Context.MODE_PRIVATE)
+                    check(SessionRepository.decode(requireNotNull(prefs.getString("last",null)))==original)
+                    check(prefs.edit().commit())
+                    File(context.getExternalFilesDir(null),"correction-switch.txt").writeText(trace.toString())
+                }
+            }
+        }
+    }
     @Test fun showSavedDiagnosticWithoutAudio() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("showDiagnostic")=="true")
         val instrumentation=InstrumentationRegistry.getInstrumentation()
