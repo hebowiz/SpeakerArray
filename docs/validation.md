@@ -552,3 +552,5 @@ debug APK、テストAPK、検証資料ZIP、チェックサム一覧の4資産�
 ユーザーから測定後のクラッシュ報告を受け、実機で設定保存と診断JSON整形中の`OutOfMemoryError`を確認しました。履歴を1件ずつ処理する設定保存、保存処理の直列化、診断への履歴重複格納の解消を実装しました。JVM 102件・Android 3件が成功し、修正版を実機へ更新しています。
 
 測定結果3件の保存と、そのうち1件のFIR生成成功を確認しました。新しいクラッシュはなく、既存候補5件と比較履歴も保持されています。共通出力はユーザー確認済みの−20 dBを保持し、成功した3回目のブースト上限は端末側で10 dBに変更されていました。条件・制約・APKハッシュは[修正と検証の報告](measurement-memory-fix.md)に記載しています。
+
+修正・回帰試験・報告はコミット`34bd51d8e4ebc849f61397ea55d40e536c1958ee`として`origin/feat/android-speaker-array`へpush済みです。同コミットを指す[メモリ不足修正Release](https://github.com/hebowiz/SpeakerArray/releases/tag/measurement-memory-fix-20261108)へ、debug APK・テストAPK・検証資料ZIP・チェックサム一覧を掲載しました。GitHub APIで4資産の`uploaded`状態、サイズ、SHA-256一致を確認しました。資料ZIPは2,532,633バイト、SHA-256は`1feed9e8167369b1873a4db833fea55b1b2e76d692e1cdf685cc53a4652a0f72`です。専用エミュレーターは終了しています。
