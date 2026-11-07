@@ -10,6 +10,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -30,6 +31,17 @@ import kotlin.math.*
     val required=listOf(Manifest.permission.RECORD_AUDIO)+if(Build.VERSION.SDK_INT>=31) listOf(Manifest.permission.BLUETOOTH_CONNECT) else emptyList()
     val permitted=remember(permissionRevision) {required.all {context.checkSelfPermission(it)==PackageManager.PERMISSION_GRANTED}}
     val permissions=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {permissionRevision++}
+    var archiveToken by rememberSaveable {mutableStateOf<String?>(null)}
+    val archiveSave=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) {uri->
+        val token=archiveToken
+        if(token!=null) {
+            if(uri==null) vm.completeExperimentalArchive(token,false)
+            else vm.saveExperimentalArchive(token) {text->withContext(Dispatchers.IO) {
+                context.contentResolver.openOutputStream(uri,"wt")!!.bufferedWriter().use {it.write(text)}
+            }}
+        }
+        archiveToken=null
+    }
     val open=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {uri->if(uri!=null) scope.launch {
         try {
             val raw=withContext(Dispatchers.IO) {context.contentResolver.openInputStream(uri)!!.bufferedReader().use {reader->
@@ -40,6 +52,7 @@ import kotlin.math.*
         } catch(e: Exception) {vm.notify("読込失敗: ${e.message}")}
     }}
     val c=vm.session.experiments.current()
+    var cleanupIds by remember(c?.id) {mutableStateOf(setOf<String>())}
     val report=remember(c?.report) {c?.let {JSONObject(it.report)}}
     var details by remember {mutableStateOf(false)}
     var comparisonIndex by remember(c?.id,c?.comparisons?.size) {mutableIntStateOf((c?.comparisons?.lastIndex ?: -1))}
@@ -73,7 +86,7 @@ import kotlin.math.*
                 if(vm.session.experiments.candidates.isNotEmpty()) Choice("候補",c?.id ?: "",vm.session.experiments.candidates.map {
                     "${it.id.take(8)} / ${it.method} / ${if(it.playable) "生成済み" else "失敗"}" to it.id},!busy,change=vm::selectExperimentalCandidate)
                 c?.let {candidate->
-                    Text("ID ${candidate.id}\n${candidate.settings.lowHz}–${candidate.settings.highHz} Hz / ${candidate.settings.taps} taps\n係数 ${candidate.coefficientHash?.take(16) ?: "生成失敗"}",fontSize=12.sp)
+                    Text("ID ${candidate.id}\n元測定 ${fmt(report?.optDouble("measuredLowHz") ?: Double.NaN)}–${fmt(report?.optDouble("measuredHighHz") ?: Double.NaN)} Hz（旧候補の不明値は—）\n設計 ${candidate.settings.lowHz}–${candidate.settings.highHz} Hz / ${candidate.settings.taps} taps\n比較評価 ${candidate.settings.lowHz}–${candidate.settings.highHz} Hz\n係数 ${candidate.coefficientHash ?: "生成失敗"}",fontSize=12.sp)
                     val block=vm.measurementBlockReason()
                     if(block!=null) Text(block,color=RightOrange,fontSize=12.sp)
                     Text("比較は現在の共通出力 ${vm.session.masterDb} dB・選択中の端点・左右割当を使用します。先に自動設計画面で端点、再生画面で左右を確認してください。",fontSize=12.sp)
@@ -86,6 +99,21 @@ import kotlin.math.*
                         OutlinedButton(onClick=vm::undoExperimental,enabled=!busy && vm.session.experiments.undo!=null) {Text("手動適用を元に戻す")}
                     }
                     TextButton(onClick=vm::removeExperimentalCandidate,enabled=!busy) {Text("一覧から削除（先にJSON保存）")}
+                    if(candidate.comparisons.isNotEmpty()) {
+                        OutlinedButton(onClick={vm.prepareExperimentalArchive()?.let {a->archiveToken=a.token;archiveSave.launch("SpeakerArray-history-${candidate.id}.json")}},enabled=!busy && !vm.experimentalArchiveWriting) {Text("比較履歴を退避")}
+                        Text("保存成功後に整理する履歴を選びます。候補と係数は保持します。",fontSize=12.sp)
+                        val archive=vm.experimentalArchive
+                        if(archive?.saved==true && archive.candidateId==candidate.id) {
+                            for(raw in candidate.comparisons) {
+                                val id=ExperimentalRuns.id(raw);val result=JSONObject(raw)
+                                if(archive.results[id]==ExperimentalRuns.identity(raw)) Row {
+                                    Checkbox(checked=id in cleanupIds,onCheckedChange={v->cleanupIds=if(v) cleanupIds+id else cleanupIds-id},enabled=!busy)
+                                    Text("${id.take(16)} / ${result.optString("stage")} / ${runTime(result)}",fontSize=11.sp)
+                                }
+                            }
+                            OutlinedButton(onClick={vm.pruneExperimentalHistory(cleanupIds);cleanupIds=emptySet()},enabled=!busy && cleanupIds.isNotEmpty()) {Text("選択した退避済み履歴を整理")}
+                        }
+                    }
                 }
             }
             val results: @Composable ()->Unit = {
@@ -100,19 +128,22 @@ import kotlin.math.*
                         Text("予測・反復${p.getInt("evaluationRepeat")} / 全帯域 片側比 ${fmt(all.optDouble("singleDb"))} / 両側比 ${fmt(all.optDouble("bothDb"))} dB")
                         Text("設計ビン 片側比 ${fmt(used.optDouble("singleDb"))} / 両側比 ${fmt(used.optDouble("bothDb"))} dB / 全帯域の低SNR ${all.getInt("lowSnrBins")}ビン・除外なし",fontSize=12.sp)
                         ExperimentalGraph(p,"有限長FIRの予測・反復${p.getInt("evaluationRepeat")}")
+                        SubbandTable(p,true)
                     }
                     TextButton(onClick={details=!details}) {Text(if(details) "詳細を閉じる" else "品質不足理由・設計ビンの詳細")}
                     if(details) {Text(d.optJSONArray("notes")?.toString(1) ?: "",fontSize=12.sp);Text("連続区間 [下限Hz, 上限Hz, ビン数]\n${d.optJSONArray("runs")}",fontSize=12.sp)}
                 }
                 if(c!=null && c.comparisons.isNotEmpty()) {
-                    Choice("過去の比較",comparisonIndex,c.comparisons.indices.map {"比較${it+1}" to it},!busy) {comparisonIndex=it}
+                    Choice("過去の比較",comparisonIndex,c.comparisons.indices.map {"比較${it+1} / ${ExperimentalRuns.id(c.comparisons[it]).take(12)}" to it},!busy) {comparisonIndex=it}
                     comparison?.let {d->
                         Text("保存された比較結果・現在の効果は未検証",color=RightOrange)
                         Text(d.optString("status","測定不能／中止"))
+                        Text("実行ID ${ExperimentalRuns.id(d.toString())}\n${runTime(d)} / ${d.optString("outcome",d.optString("stage"))}",fontSize=11.sp)
                         Text("候補 ${d.optString("candidateId")} / 共通出力 ${fmt(d.optDouble("masterDb"))} dB",fontSize=12.sp)
                         for((key,label) in listOf("single" to "片側比","both" to "両側比")) d.optJSONObject(key)?.let {r->
                             Text("$label ${if(!r.optBoolean("evaluable")) "評価不能" else if(r.optBoolean("noiseLimited")) "測定限界・下限 ${fmt(r.optDouble("lowerDb"))} dB" else "${fmt(r.optDouble("pointDb"))} dB / 保守的下限 ${fmt(r.optDouble("lowerDb"))} dB"}")}
                         Text("ノイズ床 ${fmt(powerDb(d.optDouble("noiseFloorPower")))} dB（帯域電力） / 基準変動 ${fmt(d.optDouble("baselineDriftDb"))} dB / 候補ばらつき ${fmt(d.optDouble("candidateSpreadDb"))} dB",fontSize=12.sp)
+                        SubbandTable(d,false)
                         if(d.has("hz")) ExperimentalGraph(d,"MIC録音上の相対電力・SPLではありません")
                         if(details) {Text("ラウンド別\n${d.optJSONArray("rounds")?.toString(1)}",fontSize=12.sp)
                             val readings=d.optJSONArray("readings")
@@ -125,6 +156,22 @@ import kotlin.math.*
                 Column(Modifier.weight(0.57f).fillMaxHeight().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {results()}
             } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {controls();results()}
         }
+    }
+}
+private fun runTime(d: JSONObject): String=if(d.isNull("startedAtEpochMs")) "日時不明（旧履歴）" else
+    java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z",java.util.Locale.ROOT).format(java.util.Date(d.optLong("startedAtEpochMs")))
+@Composable private fun SubbandTable(d: JSONObject,prediction: Boolean) {
+    val bands=d.optJSONArray("subbands") ?: return
+    Text(if(prediction) "固定サブバンドの予測" else "固定サブバンドのMIC相対電力",fontSize=12.sp)
+    Row {Text("Hz",Modifier.weight(.28f),fontSize=11.sp);Text("片側 / 両側 dB",Modifier.weight(.40f),fontSize=11.sp);Text(if(prediction) "低SNR" else "ノイズ床 dB",Modifier.weight(.32f),fontSize=11.sp)}
+    for(i in 0 until bands.length()) {
+        val b=bands.getJSONObject(i)
+        fun value(key: String): String {val r=b.getJSONObject(key);return if(!r.optBoolean("evaluable")) "評価不能" else if(r.optBoolean("noiseLimited")) "≥${fmt(r.optDouble("lowerDb"))}" else fmt(r.optDouble("pointDb"))}
+        val p=b.optJSONObject("prediction")
+        Row {Text("${fmt(b.getDouble("lowHz"),0)}–${fmt(b.getDouble("highHz"),0)}",Modifier.weight(.28f),fontSize=11.sp)
+            Text(if(prediction) "${fmt(p!!.optDouble("singleDb"))} / ${fmt(p.optDouble("bothDb"))}" else "${value("single")} / ${value("both")}",Modifier.weight(.40f),fontSize=11.sp)
+            Text(if(prediction) "${p!!.optInt("lowSnrBins")}ビン" else fmt(powerDb(b.optDouble("noiseFloorPower"))),Modifier.weight(.32f),fontSize=11.sp)}
+        if(!prediction) Text("${b.optString("status")} / 下限 ${fmt(b.getJSONObject("single").optDouble("lowerDb"))} / ${fmt(b.getJSONObject("both").optDouble("lowerDb"))} dB / 基準変動 ${fmt(b.optDouble("baselineDriftDb"))} / 候補ばらつき ${fmt(b.optDouble("candidateSpreadDb"))} dB",fontSize=10.sp)
     }
 }
 @Composable private fun ExperimentalGraph(d: JSONObject,label: String) {

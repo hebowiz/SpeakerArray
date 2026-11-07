@@ -113,12 +113,16 @@ object ExperimentalFir {
         val bins=pair.weights.indices.filter {pair.weights[it]>0};val requested=requestBins(settings)
         val notes=input.notes+assessment.findings.map {it.message}+if(method!="aggregate") listOf("単独反復の設計では反復性を評価していません。評価側のSNR・低減量で設計ビンを選別していません") else emptyList()
         val report=JSONObject().put("policy",VERSION).put("originalStage",input.originalStage).put("formalAccepted",false)
+            .put("measuredLowHz",input.settings.lowHz).put("measuredHighHz",input.settings.highHz)
+            .put("designLowHz",settings.lowHz).put("designHighHz",settings.highHz)
             .put("timing",JSONObject(input.timing)).put("notes",JSONArray(notes)).put("trialCoverage",assessment.pair.coverage)
             .put("designBins",JSONArray(bins)).put("designBinCount",bins.size).put("requestedBinCount",requested.size)
             .put("designFraction",bins.size.toDouble()/requested.size.coerceAtLeast(1)).put("runs",JSONArray(runs(bins).map {JSONArray(listOf(it.first()*SAMPLE_RATE/8192.0,it.last()*SAMPLE_RATE/8192.0,it.size.toDouble()))}))
         val id=sha256((input.sourceHash+method+CalibrationRepository.settings(settings).toString()+nonce).toByteArray()).take(24)
         var p: Processing?=null;var error: String?=null
         try {
+            require(settings.lowHz>=input.settings.lowHz && settings.highHz<=input.settings.highHz) {"未測定範囲へ設計帯域を拡大できません。元測定 ${input.settings.lowHz}〜${input.settings.highHz} Hz"}
+            require(JSONObject(input.timing).optDouble("residual48k",0.0)<=SAMPLE_RATE/(4*settings.highHz)) {"TIME_MODEL_UNRESOLVED: 設計上端周波数で同期残差の許容値を超えます"}
             check();require(bins.size>=20) {"重みが正の設計ビンが20未満: ${bins.size}"}
             val solution=AutoFirDesigner.design(pair,settings,input.masterDb,check)
             validateProcessing(solution.processing,settings,input.masterDb)
@@ -163,11 +167,13 @@ object ExperimentalFir {
         fun group(selected: List<Int>): JSONObject {
             fun reduction(base: DoubleArray): Any {val b=selected.sumOf {base[it]};val c=selected.sumOf {candidate[it]};return if(b>1e-24 && c>1e-24) 10*log10(b/c) else JSONObject.NULL}
             return JSONObject().put("bins",selected.size).put("singleDb",reduction(single)).put("bothDb",reduction(both))
+                .put("singlePower",selected.sumOf {single[it]}).put("bothPower",selected.sumOf {both[it]}).put("candidatePower",selected.sumOf {candidate[it]})
                 .put("lowSnrBins",selected.count {!confident[it]}).put("confidence",if(selected.all {confident[it]}) "SNR>=20" else "信頼度不足を含む・除外なし")
         }
         fun ratios(base: DoubleArray)=JSONArray(bins.map {k->if(base[k]>1e-24 && candidate[k]>1e-24) 10*log10(base[k]/candidate[k]) else JSONObject.NULL})
         return JSONObject().put("type","finite-FIR-prediction-not-measurement").put("spectrum","equal energy per requested 48000/8192 Hz bin; no postselection")
             .put("fullBand",group(bins)).put("designBins",group(bins.filter {weights[it]>0}))
+            .put("subbands",JSONArray(ExperimentalBands.fixed(s.lowHz,s.highHz).map {band->band.json().put("prediction",group(band.bins))}))
             .put("hz",JSONArray(bins.map {it*SAMPLE_RATE/8192.0})).put("singleDb",ratios(single)).put("bothDb",ratios(both))
             .put("lowSnr",JSONArray(bins.map {!confident[it]})).put("outsideDesign",JSONArray(bins.map {weights[it]<=0}))
     }
@@ -182,7 +188,7 @@ object ExperimentalRepository {
     fun readCandidate(o: JSONObject): ExperimentalCandidate {
         val c=ExperimentalCandidate(o.getString("id"),o.getString("sourceHash"),o.getString("method"),CalibrationRepository.readSettings(o.getJSONObject("settings")),
             o.getDouble("masterDb"),o.optJSONObject("processing")?.let {SessionRepository.readProcessing(it)},o.getJSONArray("weights").doublesArray(4097).toList(),
-            o.getJSONObject("report").toString(),if(o.isNull("error")) null else o.getString("error"),o.getJSONArray("comparisons").let {a->List(a.length()) {a.getJSONObject(it).toString()}})
+            o.getJSONObject("report").toString(),if(o.isNull("error")) null else o.getString("error"),o.getJSONArray("comparisons").let {a->List(a.length()) {ExperimentalRuns.migrate(a.getJSONObject(it),it)}})
         c.validate();c.processing?.let {ExperimentalFir.validateProcessing(it,c.settings,c.masterDb)};require(c.coefficientHash==if(o.isNull("coefficientHash")) null else o.getString("coefficientHash")) {"係数ハッシュ不一致"}
         c.comparisons.forEach {val result=JSONObject(it)
             require(!result.getBoolean("formalAccepted") && result.getString("coefficientHash")==c.coefficientHash && result.getString("candidateId")==c.id) {"別候補または正式結果を実験結果に流用できません"}

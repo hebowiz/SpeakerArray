@@ -39,6 +39,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var experimentalData by mutableStateOf<ExperimentalInput?>(null); private set
     var experimentalSettings by mutableStateOf<AutoFirSettings?>(null); private set
     var experimentalMethod by mutableStateOf("aggregate")
+    var experimentalArchive by mutableStateOf<ExperimentalArchive?>(null); private set
+    var experimentalArchiveWriting by mutableStateOf(false); private set
 
     var autoProgress by mutableStateOf(AutoProgress()); private set
     var measurementRoute by mutableStateOf(MeasurementRouteState()); private set
@@ -569,11 +571,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         } catch(e: Exception) {notify("復元失敗: ${e.message}")}
     }
     fun exportExperimental(): String = session.experiments.current()?.let(ExperimentalRepository::export) ?: ""
+    fun prepareExperimentalArchive(): ExperimentalArchive? {
+        if(autoBusy || experimentalArchiveWriting) return null
+        return session.experiments.current()?.let {ExperimentalArchive.prepare(it).also {a->experimentalArchive=a}}
+    }
+    fun completeExperimentalArchive(token: String,success: Boolean) {
+        experimentalArchive?.takeIf {it.token==token}?.let {experimentalArchive=it.completed(success)}
+        notify(if(success) "退避を保存しました。整理する履歴を選択してください" else "退避は未完了です。履歴は保持しています")
+    }
+    fun saveExperimentalArchive(token: String,writer: suspend (String)->Unit)=viewModelScope.launch {
+        val archive=experimentalArchive?.takeIf {it.token==token} ?: return@launch
+        if(experimentalArchiveWriting) return@launch
+        experimentalArchiveWriting=true
+        try {writer(archive.payload);completeExperimentalArchive(token,true)}
+        catch(e: Exception) {completeExperimentalArchive(token,false);notify("退避保存失敗: ${e.message}")}
+        finally {experimentalArchiveWriting=false}
+    }
+    fun pruneExperimentalHistory(ids: Set<String>) {
+        if(autoBusy || experimentalArchiveWriting) return
+        try {
+            val c=requireNotNull(session.experiments.current());val archive=requireNotNull(experimentalArchive)
+            val next=archive.remove(c,ids)
+            update {s->s.copy(experiments=s.experiments.copy(candidates=s.experiments.candidates.map {if(it.id==c.id) next else it}))}
+            experimentalStatus="選択した比較履歴を整理しました・同じ候補で再測定できます"
+        } catch(e: Exception) {notify("履歴整理を中止: ${e.message}")}
+    }
     fun compareExperimental() {
         if(autoBusy || loading) return
         val c=session.experiments.current() ?: return
         if(!c.playable) {notify(c.error ?: "候補なし");return}
-        if(c.comparisons.size>=3) {notify("この候補の比較履歴は3件です。JSONへ保存してください");return}
+        if(c.comparisons.size>=3) {notify("比較履歴が3件です。「比較履歴を退避」後に選択した履歴を整理してください");return}
         if(session.experiments.candidates.sumOf {it.report.length+it.comparisons.sumOf(String::length)}>20_000_000) {notify("比較結果の保存領域が不足しています。JSONへ保存後に候補一覧を整理してください");return}
         if(needsMapping) {notify("比較前に左右の確認を行ってください");return}
         val original=session
@@ -588,6 +615,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         engine.stop();releaseHeldRoute();autoBusy=true;experimentalPage=true;autoTerminal=false
         measurementDeviceIds=output.id to input.id;experimentalStatus="比較測定中・固定候補 ${c.id}"
         val experimentEpoch=++autoEpoch
+        val run=ExperimentalRuns.start(c).put("masterDb",original.masterDb).put("settings",CalibrationRepository.settings(config))
         autoJob=viewModelScope.launch(start=CoroutineStart.UNDISPATCHED) {
             var runner: ExperimentalMeasurement?=null
             try {
@@ -595,20 +623,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 prepareJob?.cancelAndJoin()
                 val m=ExperimentalMeasurement(getApplication(),output,input,config,original,c,
                     {v->viewModelScope.launch {if(autoEpoch==experimentEpoch && autoBusy && !autoTerminal) experimentalStatus="比較測定中: $v"}},
-                    {r->viewModelScope.launch {if(autoEpoch==experimentEpoch) measurementRoute=r}})
+                    {r->viewModelScope.launch {if(autoEpoch==experimentEpoch) measurementRoute=r}},run)
                 runner=m
                 val result=withContext(Dispatchers.Default) {m.run()}
                 ensureActive();experimentalStatus="比較結果あり: ${result.getString("status")}"
-            } catch(e: CancellationException) {experimentalStatus=if(e is TimeoutCancellationException) "測定不能／中止: 処理時間上限（${e.message}）" else "測定不能／中止: 取消";runner?.diagnostic?.put("stage",if(e is TimeoutCancellationException) "ABORTED" else "CANCELLED")?.put("status",experimentalStatus)}
-            catch(e: Exception) {experimentalStatus="測定不能／中止: ${e.message}";runner?.diagnostic?.put("stage","ABORTED")?.put("status",experimentalStatus)}
+            } catch(e: CancellationException) {experimentalStatus=if(e is TimeoutCancellationException) "測定不能／中止: 処理時間上限（${e.message}）" else "測定不能／中止: 取消";run.put("stage",if(e is TimeoutCancellationException) "ABORTED" else "CANCELLED").put("outcome",if(e is TimeoutCancellationException) "ABORTED" else "CANCELLED").put("status",experimentalStatus)}
+            catch(e: Exception) {experimentalStatus="測定不能／中止: ${e.message}";run.put("stage","ABORTED").put("outcome","ABORTED").put("status",experimentalStatus)}
             finally {
                 autoTerminal=true
                 withContext(NonCancellable) {
                     withContext(Dispatchers.IO) {runner?.audio?.close()}
-                    val result=runner?.diagnostic?.toString()
-                    val next=if(result!=null) original.copy(experiments=original.experiments.copy(candidates=original.experiments.candidates.map {
+                    val result=run.put("endedAtEpochMs",System.currentTimeMillis()).toString()
+                    val next=original.copy(experiments=original.experiments.copy(candidates=original.experiments.candidates.map {
                         if(it.id==c.id) it.copy(comparisons=it.comparisons+result) else it
-                    })) else original
+                    }))
                     try {next.validate();session=next;engine.settings=next;persist()}
                     catch(e: Exception) {session=original;notify("結果の保存上限: ${e.message}")}
                     autoBusy=false;autoJob=null;measurementDeviceIds=null;engine.stop();scheduleProcessing()

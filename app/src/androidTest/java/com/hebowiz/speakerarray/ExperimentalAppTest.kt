@@ -26,8 +26,8 @@ class ExperimentalAppTest {
                 processing=Processing(513,phaseDeg=45.0),simple=SimpleCorrection(sinePhaseDeg=-90.0,right=Channel(gainDb=-3.0)))))}
         rule.waitUntil(10000) {!vm.preparing && !vm.engine.isRunning};Thread.sleep(300)
     }
-    private fun diagnostic(): String {
-        val s=AutoFirSettings(lowHz=500.0,highHz=1000.0,taps=257)
+    private fun diagnostic(wide: Boolean=false): String {
+        val s=AutoFirSettings(lowHz=if(wide) 300.0 else 500.0,highHz=if(wide) 3400.0 else 1000.0,taps=257)
         val order=JSONArray((0..3).map {i->JSONObject().put("tag",if(i%2==0) "L" else "R").put("pilotBefore",i*200000L)
             .put("signalFrame",i*200000L+24000).put("pilotAfter",i*200000L+170000).put("signalFrames",144000)})
         val t=JSONObject().put("method",SyncPolicy.VERSION).put("analyzable",true).put("reliable",false).put("offset48k",12000.0)
@@ -83,9 +83,14 @@ class ExperimentalAppTest {
         rule.waitUntil(10000) {!vm.autoBusy};assertEquals(original.processing,vm.session.processing);assertEquals(original.simple,vm.session.simple)
     }
     @Test fun seedExperimentalForProcessRestart() {
-        init();generate();rule.runOnIdle {vm.applyExperimental();vm.persist()};Thread.sleep(700)
+        init();generate();rule.runOnIdle {vm.applyExperimental()}
+        val c=vm.session.experiments.current()!!
+        val run=ExperimentalRuns.start(c).put("stage","CANCELLED").toString()
+        rule.runOnIdle {vm.loadSession(SessionRepository.encode(vm.session.copy(experiments=vm.session.experiments.copy(candidates=listOf(c.copy(comparisons=listOf(run)))))))}
+        rule.waitUntil(10000) {!vm.preparing}
+        rule.runOnIdle {val a=vm.prepareExperimentalArchive()!!;vm.completeExperimentalArchive(a.token,true);vm.pruneExperimentalHistory(setOf(ExperimentalRuns.id(run)));vm.persist()};Thread.sleep(700)
         rule.activity.getSharedPreferences("experimental-test",0).edit().putInt("pid",android.os.Process.myPid())
-            .putString("hash",vm.session.experiments.current()!!.coefficientHash).commit()
+            .putString("hash",vm.session.experiments.current()!!.coefficientHash).putString("oldRunId",ExperimentalRuns.id(run)).commit()
     }
     @Test fun restoreExperimentalInNewProcess() {
         init(false);val prefs=rule.activity.getSharedPreferences("experimental-test",0)
@@ -94,6 +99,7 @@ class ExperimentalAppTest {
         assertFalse(vm.maintainingRoute);assertTrue(vm.calibrationStatus().contains("未検証"))
         rule.runOnIdle {vm.start()};rule.waitUntil(10000) {vm.audio.playing && vm.audio.message=="再生"}
         rule.runOnIdle {vm.stop()};rule.waitUntil(5000) {!vm.engine.isRunning}
+        assertNotEquals(prefs.getString("oldRunId",null),ExperimentalRuns.start(vm.session.experiments.current()!!).getString("runId"))
     }
     @Test fun silentComparisonRejectsAbsentSignalAndGuiRetainsStopAndResults() {
         init();generate();val original=vm.session
@@ -119,5 +125,56 @@ class ExperimentalAppTest {
             shell("wm size 320x700");Thread.sleep(800)
             rule.onNodeWithContentDescription("常設の停止").assertIsDisplayed()
         } finally {rule.runOnIdle {vm.stop()};shell("wm size reset");shell("wm density reset")}
+    }
+    @Test fun archiveFailureCancellationAndExplicitCleanupAllowSameCandidateRetry() {
+        init();generate()
+        rule.runOnIdle {vm.storeAB(false);vm.dismissMessage();vm.applyExperimental()};rule.waitUntil(10000) {!vm.preparing}
+        val c=vm.session.experiments.current()!!
+        val full=c.copy(comparisons=listOf("ABORTED","CANCELLED","COMPLETED").map {stage->JSONObject()
+            .put("candidateId",c.id).put("coefficientHash",c.coefficientHash).put("formalAccepted",false).put("stage",stage).toString()})
+        val session=vm.session.copy(experiments=vm.session.experiments.copy(candidates=listOf(full)))
+        rule.runOnIdle {vm.loadSession(SessionRepository.encode(session))};rule.waitUntil(10000) {!vm.preparing}
+        val before=vm.session;val ids=before.experiments.current()!!.comparisons.map(ExperimentalRuns::id)
+        rule.runOnIdle {vm.confirmMapping(false);vm.compareExperimental()};assertFalse(vm.autoBusy)
+        rule.runOnIdle {vm.dismissMessage()}
+        rule.onNodeWithText("比較履歴を退避").performScrollTo().performClick()
+        Thread.sleep(1000)
+        InstrumentationRegistry.getInstrumentation().uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+        rule.waitUntil(5000) {vm.message.contains("退避は未完了")}
+        assertEquals(before,vm.session)
+        rule.runOnIdle {vm.dismissMessage();vm.prepareExperimentalArchive()}
+        val token=vm.experimentalArchive!!.token
+        rule.runOnIdle {vm.completeExperimentalArchive(token,false);vm.pruneExperimentalHistory(setOf(ids[0]))}
+        assertEquals(before,vm.session)
+        rule.runOnIdle {vm.saveExperimentalArchive(token) {throw java.io.IOException("fixture write failure")}}
+        rule.waitUntil(5000) {!vm.experimentalArchiveWriting};assertFalse(vm.experimentalArchive!!.saved);assertEquals(before,vm.session)
+        rule.runOnIdle {vm.saveExperimentalArchive(token) {throw kotlinx.coroutines.CancellationException("fixture cancel")}}
+        rule.waitUntil(5000) {!vm.experimentalArchiveWriting};assertFalse(vm.experimentalArchive!!.saved);assertEquals(before,vm.session)
+        rule.runOnIdle {vm.saveExperimentalArchive(token) {raw->java.io.File(rule.activity.getExternalFilesDir(null),"wideband-history.json").writeText(raw)}}
+        rule.waitUntil(5000) {vm.experimentalArchive?.saved==true};assertEquals(before,vm.session)
+        rule.runOnIdle {vm.dismissMessage()}
+        rule.onNodeWithText("選択した退避済み履歴を整理").performScrollTo().assertIsDisplayed()
+        rule.runOnIdle {vm.pruneExperimentalHistory(setOf(ids[0]))}
+        assertEquals(2,vm.session.experiments.current()!!.comparisons.size)
+        assertEquals(before.copy(experiments=vm.session.experiments),vm.session)
+        rule.runOnIdle {vm.confirmMapping(false);vm.compareExperimental()};rule.waitUntil(15000) {!vm.autoBusy}
+        val after=vm.session.experiments.current()!!;assertEquals(3,after.comparisons.size)
+        assertEquals(c.id,after.id);assertEquals(c.coefficientHash,after.coefficientHash)
+        assertFalse(ExperimentalRuns.id(after.comparisons.last()) in ids)
+        assertEquals(before.copy(experiments=vm.session.experiments),vm.session);assertFalse(vm.audio.playing)
+    }
+    @Test fun widebandPresetIsExplicitAndPredictionTableRemainsAccessible() {
+        init();val old=vm.session.autoFir
+        rule.runOnIdle {vm.experimentalPage=false}
+        assertEquals(old,vm.session.autoFir)
+        rule.onNodeWithText("主試験帯域 300〜3,400 Hz").performScrollTo().performClick()
+        assertEquals(300.0,vm.session.autoFir.lowHz,0.0);assertEquals(3400.0,vm.session.autoFir.highHz,0.0)
+        rule.runOnIdle {vm.selectExperimentalData(diagnostic(true));vm.generateExperimental()};rule.waitUntil(15000) {!vm.autoBusy}
+        assertTrue(vm.session.experiments.current()!!.playable)
+        rule.onAllNodesWithText("固定サブバンドの予測")[0].performScrollTo().assertIsDisplayed()
+        rule.onAllNodesWithText("2000–3400")[0].performScrollTo().assertIsDisplayed()
+        rule.onNodeWithContentDescription("常設の停止").assertIsDisplayed()
+        val image=rule.onRoot().captureToImage().asAndroidBitmap()
+        java.io.File(rule.activity.getExternalFilesDir(null),"wideband-table.png").outputStream().use {image.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)}
     }
 }

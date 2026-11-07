@@ -11,5 +11,6 @@ tasks.register<JavaExec>("experimentalFir") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("com.hebowiz.speakerarray.core.ExperimentalOfflineKt")
     args(providers.gradleProperty("experimentInput").getOrElse("../build/practical-audit"),
-        providers.gradleProperty("experimentOutput").getOrElse("../build/experimental-audit/offline"))
+        providers.gradleProperty("experimentOutput").getOrElse("../build/experimental-audit/offline"),
+        providers.gradleProperty("experimentMode").getOrElse("narrow"))
 }

@@ -147,7 +147,7 @@ class ExperimentalFirTest {
             val c=base.copy(processing=p,id=if(mute) "muted" else "wrong-phase")
             val result=immediate {ExperimentalComparison(c,plan).run(PcmMeter(c,plan))}
             val value=result.getJSONObject("single").getDouble("pointDb")
-            if(mute) assertEquals(0.0,value,.2) else assertTrue(value<0)
+            if(mute) assertEquals(0.0,value,.2) else {assertTrue(value<0);assertEquals("INCREASE",result.getString("outcome"))}
             assertTrue(result.getJSONObject("single").getDouble("lowerDb")<3)
         }
     }
@@ -192,5 +192,76 @@ class ExperimentalFirTest {
         assertFalse(ExperimentalSettling.ready(List(3) {signal},2.0,2.0,1e-12,false))
         assertTrue(ExperimentalSettling.ready(List(3) {signal},4.0,2.0,1e-12,true))
         assertFalse(ExperimentalSettling.ready(listOf(signal,signal,signal.copy(power=1e-6)),4.0,2.0,1e-12,true))
+    }
+    @Test fun fullLegacyHistoryCanArchiveAndPruneOnlySavedSelectionWithoutChangingCandidate() {
+        val base=candidate()
+        val old=base.copy(comparisons=listOf("ABORTED","CANCELLED","COMPLETED").map {stage->
+            JSONObject().put("candidateId",base.id).put("coefficientHash",base.coefficientHash).put("formalAccepted",false).put("stage",stage).toString()})
+        val c=ExperimentalRepository.import(ExperimentalRepository.export(old))
+        assertEquals(3,c.comparisons.size);assertEquals(3,c.comparisons.map(ExperimentalRuns::id).distinct().size)
+        assertTrue(c.comparisons.all {JSONObject(it).isNull("startedAtEpochMs")})
+        val archive=ExperimentalArchive.prepare(c);val selected=setOf(ExperimentalRuns.id(c.comparisons[1]))
+        assertThrows(IllegalArgumentException::class.java) {archive.remove(c,selected)}
+        assertThrows(IllegalArgumentException::class.java) {archive.completed(false).remove(c,selected)}
+        val saved=archive.completed(true);val next=saved.remove(c,selected)
+        assertEquals(c.copy(comparisons=listOf(c.comparisons[0],c.comparisons[2])),next)
+        assertEquals(c,ExperimentalRepository.import(saved.payload))
+        val restored=SessionRepository.decode(SessionRepository.encode(Session(experiments=ExperimentalLibrary(listOf(next),next.id))))
+        val newer=ExperimentalRuns.start(restored.experiments.current()!!)
+        assertFalse(c.comparisons.map(ExperimentalRuns::id).contains(newer.getString("runId")))
+        assertEquals(1000,(1..1000).map {ExperimentalRuns.start(next).getString("runId")}.distinct().size)
+        val changed=c.copy(comparisons=c.comparisons.map {JSONObject(it).put("status","changed").toString()})
+        assertThrows(IllegalArgumentException::class.java) {saved.remove(changed,selected)}
+    }
+    @Test fun designCannotExpandOutsideExcitationAndChecksActualUpperFrequency() {
+        val data=input()
+        val count=AutoFirDesigner.designInvocations.get()
+        val expanded=ExperimentalFir.generate(data,settings=data.settings.copy(lowHz=300.0,highHz=3400.0))
+        assertFalse(expanded.playable);assertTrue(expanded.error!!.contains("未測定範囲"))
+        assertEquals(count,AutoFirDesigner.designInvocations.get())
+        val wide=data.copy(settings=settings.copy(lowHz=300.0,highHz=3400.0),timing="{\"residual48k\":4.0}")
+        assertFalse(ExperimentalFir.generate(wide).playable)
+        assertTrue(ExperimentalFir.generate(wide,settings=settings).playable)
+    }
+    @Test fun widebandActualPcmMatchesPredictionAndSubbandPowerSumsWithoutRedesign() {
+        val wide=settings.copy(lowHz=300.0,highHz=3400.0)
+        val c=ExperimentalFir.generate(input().copy(settings=wide));assertTrue(c.error,c.playable)
+        val plan=ExperimentalPlan.forSettings(wide);val count=AutoFirDesigner.designInvocations.get()
+        val result=immediate {ExperimentalComparison(c,plan).run(PcmMeter(c,plan))}
+        val prediction=JSONObject(c.report).getJSONArray("predictions").getJSONObject(0)
+        assertEquals(prediction.getJSONObject("fullBand").getDouble("singleDb"),result.getJSONObject("single").getDouble("pointDb"),1.0)
+        val bands=ExperimentalBands.fixed(300.0,3400.0);val bins=bands.flatMap {it.bins}
+        assertEquals(bins.size,bins.distinct().size);assertEquals(ExperimentalFir.requestBins(wide),bins)
+        assertEquals(count,AutoFirDesigner.designInvocations.get());assertEquals(c.coefficientHash,result.getString("coefficientHashAfter"))
+        val r=result.getJSONArray("subbands");val readings=result.getJSONArray("readings")
+        for((condition,power) in listOf("SINGLE" to "singlePower","BOTH" to "bothPower","CANDIDATE" to "candidatePower")) {
+            val full=(0 until readings.length()).map {readings.getJSONObject(it)}.filter {it.getString("condition")==condition}
+                .flatMap {o->val w=o.getJSONArray("windows");(0 until w.length()).map {w.getJSONObject(it).getDouble("power")}}.average()
+            assertEquals(full,(0 until r.length()).sumOf {r.getJSONObject(it).getDouble(power)},1e-14)
+        }
+        val p=prediction.getJSONArray("subbands")
+        assertEquals(prediction.getJSONObject("fullBand").getDouble("candidatePower"),(0 until p.length()).sumOf {p.getJSONObject(it).getJSONObject("prediction").getDouble("candidatePower")},1e-12)
+    }
+    @Test fun fixedSubbandsKeepLocalIncreaseAndLocalNoiseFloorDespiteGoodOverallSnr() {
+        val bands=ExperimentalBands.fixed(300.0,3400.0)
+        val conditions=listOf(ExperimentalCondition.DARK)+List(6) {ExperimentalCondition.SINGLE}+List(6) {ExperimentalCondition.BOTH}+List(3) {ExperimentalCondition.CANDIDATE}+ExperimentalCondition.DARK
+        val readings=conditions.mapIndexed {i,condition->
+            val spectrum=MutableList(4097) {0.0}
+            bands.forEachIndexed {j,band->val power=when(condition) {
+                ExperimentalCondition.DARK->if(j==3) .01 else 1e-12
+                ExperimentalCondition.SINGLE->if(j==3) .001 else 1.0
+                ExperimentalCondition.BOTH->if(j==3) .001 else 2.0
+                ExperimentalCondition.CANDIDATE->listOf(.1,.2,3.0,.001)[j]
+            };band.bins.forEach {spectrum[it]=power/band.bins.size}}
+            ExperimentalReading("$i",condition,List(3) {BandWindow(spectrum.sum(),spectrum,.1)},i.toLong(),i.toLong(),2.0,i.toLong(),i*100L,i*100L+50)
+        }
+        val low=ExperimentalBands.measured(readings,bands[0]);val increase=ExperimentalBands.measured(readings,bands[2]);val high=ExperimentalBands.measured(readings,bands[3])
+        assertEquals(10.0,low.getJSONObject("single").getDouble("pointDb"),1e-8)
+        assertTrue(increase.getJSONObject("single").getDouble("pointDb")<0)
+        assertTrue(increase.getBoolean("increaseObserved"));assertEquals("増音を観測",increase.getString("status"))
+        assertFalse(high.getBoolean("evaluable"));assertTrue(high.getJSONObject("single").isNull("pointDb"))
+        val full=ExperimentalBands.measured(readings,ExperimentalBands.Band(300.0,3400.0,bands.flatMap {it.bins}))
+        assertTrue(full.getBoolean("evaluable"))
+        assertNotEquals((10.0+10*log10(5.0)+10*log10(1.0/3))/3,full.getJSONObject("single").getDouble("pointDb"),.1)
     }
 }

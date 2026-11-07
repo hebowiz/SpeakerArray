@@ -425,3 +425,76 @@ RFMonitorは読み取りだけで照合しました。開始・終了のHEAD、G
 ### push完了（2026-11-07）
 
 ユーザーの依頼を受け、実験用FIRの実装・テスト・設計書・予測レポート・USBインストール記録をコミット`d03cc7f9eba7f9e7e8c1ed269c4037bfc32042d2`として`origin/feat/android-speaker-array`へpushしました。push前に検証済みビルドのソース・設定・分析ツール60ファイルのSHA-256一致と差分検査を確認しています。生診断JSON、APK、ローカル監査データはGitへ追加していません。mainへのマージは行っていません。
+
+## 広帯域実証の準備（2026-11-07）
+
+開始時のブランチは`feat/android-speaker-array`、HEADは`d181668f825356efd3320e7fb38c52ddfa4d9f3a`で、作業ツリーはクリーンでした。今回の変更は同HEADへの未コミット差分です。commit・push・mainへのマージは行っていません。作業範囲は、ユーザーが300〜3,400 Hzで実機比較を行うための準備までです。
+
+### 履歴と広帯域評価
+
+比較履歴の3件上限を保ち、JSONへの退避成功後に選択した履歴だけを整理する操作を追加しました。候補ID・係数・設計条件・元診断との対応を変えず、同じ候補で再測定できます。SAF取消・書込み失敗では履歴を保持し、保存成功だけでも削除しません。新しい比較にはUUIDの実行IDと開始・終了日時を記録します。旧候補JSONとセッション形式1〜5の読込互換、両補正スロット、A/B、校正結果、手動適用を元に戻す設定を維持しています。
+
+主試験帯域を明示選択するボタンと、元測定・設計・比較評価の帯域表示を追加しました。測定範囲外へ広げた設計は拒否し、同期残差は設計上端周波数で確認します。300〜500、500〜1,000、1,000〜2,000、2,000〜3,400 Hzの固定サブバンドを予測と比較へ追加し、片側比・両側比・下限・ノイズ床・基準変動・候補ばらつき・評価可能性を保存・表示します。全帯域の判定を各帯域へ流用せず、局所的な増音も残します。
+
+正式判定、候補生成の禁止条件、ブーストとピーク上限、BT出力＋BT MICの禁止は維持しました。比較中の再設計、音量の自動変更、良好な周波数だけへの評価範囲変更、実験結果の正式合格への昇格はありません。
+
+### 保存データ解析
+
+主対象は準備確認後の`hfp-ready-minus24-session1.json`で、SHA-256は`5ccb1c0a016cddbbc61ec1b1c838cc8b5c433cb6b4cae5e6dc4e30b384e70f2c`です。準備前4件は参考群として分けました。生PCMはなく、保存複素応答の解析です。
+
+主対象から集約・交差2方向の3候補を生成できました。すべて1,025 taps、正則化0.01、最大ブースト6 dB、共通出力−24 dBです。交差予測の全帯域片側比は4.36〜4.42 dB、両側比は7.65〜7.72 dBでした。一方、約931.64 Hzでは片側比−5.16／−4.61 dB、低SNRの約1,623.05 Hzでは−7.18／−5.42 dBの増音が残っています。
+
+参考群を含む15候補は9候補が生成でき、6候補は設計ビン不足または全周波数ブースト上限超過で失敗しました。成績による設定探索や閾値変更は行っていません。元判定・時刻モデル・低SNRを保持し、[分析レポート](wideband-analysis.md)と5種類のCSVに全結果を記録しました。実測低減量や一様な改善を示す結果ではありません。
+
+### ソフトウェア試験
+
+| 検証 | 結果 |
+|---|---|
+| JVM | 96件成功。既存92件＋広帯域・履歴の追加4件 |
+| Python | 4件成功。既存分析2件＋退避JSONの集計2件 |
+| Android | 音声無効のAPI 27エミュレーターで27件成功。既存25件＋追加2件。再実行した同一テストは重複計上していません |
+| APK | debug APK・テストAPKの生成成功 |
+| Lint | エラー0件、依存関係の更新通知5件 |
+
+履歴試験では、実行IDのない旧候補の中止・取消・完了3件を読み込み、満杯での開始拒否、退避、1件だけの整理、同一候補での再試行まで確認しました。保存ダイアログを実際に開いて戻る操作で取り消し、履歴が失われないことを確認しています。書込み例外と取消例外、保存成功後も自動削除しないこと、保存後に内容が変わった履歴の整理拒否も試験しました。
+
+候補と係数、適用中FIR、両スロット、A/B、復元用設定は履歴操作の前後で一致しています。JSON取込と履歴整理後のプロセス再起動でも、以前の実行IDを再利用しないことを確認しました。再起動試験は`am force-stop`を挟み、保存側と復元側でPIDが異なることを検査しています。旧日時の欠落を現在時刻で補うことはありません。
+
+300〜3,400 Hzの合成伝達から候補を設計し、実際の`SourceEngine`・`DspEngine`のPCMを反射のある2経路へ通して、電力と比較結果まで確認しました。有限長予測との差は1 dB以内で、比較前後の係数ハッシュが一致し、設計器の呼出し回数も増えません。サブバンドの境界重複がなく、線形電力の和が全帯域と一致します。一部だけの改善、局所的な増音、全帯域のSNRは十分でも高域サブバンドが評価不能になる例を区別しました。
+
+既存の正式条件、安全性、BT入出力制限、失敗・取消後の設定保持と停止、MIC権限なしの通常再生も回帰試験を通しました。無音エミュレーターでは候補の合格や音響低減を認定せず、整定不能として中止することを確認しています。横置きのサブバンド表、常設停止、スクロール操作も確認しました。
+
+最初のGradle呼出しではPowerShellがプロパティのパスを別引数として渡し、タスク解決に失敗しました。`'-PexperimentOutput=...'`のように引数全体を引用して再実行しています。実装の判定条件を変更して試験を通したものではありません。
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio1\jbr'
+.\gradlew.bat :core:test :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --console=plain
+.\gradlew.bat :core:experimentalFir '-PexperimentMode=wideband' '-PexperimentOutput=../build/wideband-audit/offline' --console=plain
+python tools/summarize_wideband.py build/wideband-audit/offline docs/analysis
+python -m unittest discover -s tools -p 'test_*.py'
+# 専用エミュレーターの起動オプション
+# -avd SpeakerArrayTest -port 5556 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+adb -s emulator-5556 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5556 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+$runner='com.hebowiz.speakerarray.test/androidx.test.runner.AndroidJUnitRunner'
+$ex='com.hebowiz.speakerarray.ExperimentalAppTest'
+adb -s emulator-5556 shell pm revoke com.hebowiz.speakerarray android.permission.RECORD_AUDIO
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#archiveFailureCancellationAndExplicitCleanupAllowSameCandidateRetry,$ex#widebandPresetIsExplicitAndPredictionTableRemainsAccessible" $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#seedExperimentalForProcessRestart" $runner
+adb -s emulator-5556 shell am force-stop com.hebowiz.speakerarray
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#restoreExperimentalInNewProcess" $runner
+```
+
+既存試験は前節のAppTest・CorrectionAppTest・PracticalAppTest・ToneAppTest・FirReuseAppTestとExperimentalAppTestの構成で実行しました。全ADB操作で`emulator-5556`を指定し、実機やHfpDeviceTestは操作・実行していません。退避JSONをエミュレーターから取得し、集計ツールで3実行を読み取れることも確認しました。旧結果の欠落値は空欄のままです。
+
+### APK、ソース、未確認事項
+
+今回のdebug APKは`app/build/outputs/apk/debug/app-debug.apk`、SHA-256は`5c481fe83f7f54a79cf171b2eeb88e0423023cbdedf0e1d2f85463e6c0c4014f`です。versionNameは`0.1.0`、versionCodeは`1`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`、SHA-256は`372a49aee2440bdbdafa48cd11320c99f1c4cb343b296e0c1a901ad245a07e88`です。
+
+前段でUSB実機へインストールしたAPKのSHA-256は`821938b861a8718faaf940ac69bae58fced23133a0d8dad09355bde3aac402d1`で、今回のAPKとは異なります。今回は実機への更新インストール・起動・設定操作・音出し・MIC録音を行っていません。実機での広帯域低減、同一候補の実行間再現性、実用化は未確認です。
+
+今回のビルドは開始時HEADにこの変更を加えたソースです。Android試験後、電力結果の表示を効果不足と増音に分け、負値の分類をJVMで確認しました。最終ソースで両APK・JVM・Lintを再実行し、その後は文書だけを更新しました。対象65ファイルのSHA-256一覧は`build/wideband-audit/source-sha256.txt`に保存し、一覧自体のSHA-256は`38f4ab35c2ce012f872435200c1039b201285ed898164d093f40b2d7cebcc8d2`です。対象は`app/src/`、`core/src/`、`gradle/`、`tools/`、`*.gradle.kts`、`gradle.properties`、`gradlew`、`gradlew.bat`です。相対パスを昇順に並べ、`SHA-256  相対パス`、UTF-8・LFで保存しています。
+
+RFMonitorは開始・終了のHEAD、Git状態、257ファイルのSHA-256が一致しました。読み取り以外の操作、編集・生成・ビルド・テスト・Git変更は行っていません。照合結果と試験ログはSpeakerArrayの無視対象`build/wideband-audit/`に保存しています。生診断、端末固有情報、APK、ローカル監査データをGitへ追加していません。
+
+ユーザー向けの[実機手順書](wideband-procedure.md)、[設置・測定記録テンプレート](wideband-record-template.md)、[比較集計CSVテンプレート](templates/wideband-comparison-template.csv)を用意しました。保存データの予測成功や狭帯域の成功を、新規広帯域測定の必須条件にはしていません。次はユーザーが同じ設置・音量・候補で3回の比較実行を行い、その結果JSONから予測との差と再現性を解析します。

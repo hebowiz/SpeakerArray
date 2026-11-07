@@ -80,6 +80,8 @@ import kotlin.math.*
                         Text("補正ch −6〜+6 dB / 位相30°粗探索→5°微調整 / ゲイン2 dB→0.5 dB。基準chは0 dB固定。")
                         Text("概算 ${plan.estimatedSeconds}秒〜最大${plan.maxSeconds}秒。実測遅延・整定に応じて延長。最大${plan.maxMeasurements}評価、各0.5秒×3窓。",fontSize=12.sp)
                     } else {
+                    OutlinedButton(onClick={vm.autoSettings {it.copy(lowHz=300.0,highHz=3400.0)}}) {Text("主試験帯域 300〜3,400 Hz")}
+                    Text("要求帯域です。HFPの実測通過帯域を保証する値ではありません。",fontSize=12.sp)
                     NumberControl("測定下限",s.lowHz,"Hz",80.0..10000.0,vm::stop,slider=false) {v->vm.autoSettings {it.copy(lowHz=v)}}
                     NumberControl("測定上限",s.highHz,"Hz",100.0..16000.0,vm::stop,slider=false) {v->vm.autoSettings {it.copy(highHz=v)}}
                     }

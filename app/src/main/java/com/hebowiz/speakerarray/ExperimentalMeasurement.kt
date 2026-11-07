@@ -12,12 +12,13 @@ import kotlin.math.*
 /** Evaluates a fixed candidate. Contains no transfer estimator or FIR designer call. */
 class ExperimentalMeasurement(context: Context, output: AudioDeviceInfo, input: AudioDeviceInfo,
     private val config: AutoFirSettings, private val original: Session, private val candidate: ExperimentalCandidate,
-    private val progress: (String)->Unit, route: (MeasurementRouteState)->Unit) : ExperimentalMeter {
+    private val progress: (String)->Unit, route: (MeasurementRouteState)->Unit,
+    run: JSONObject=ExperimentalRuns.start(candidate)) : ExperimentalMeter {
     val audio=MeasurementAudio(context,output,input,config,route)
     val plan=ExperimentalPlan.forSettings(config)
     override val coefficientHash=getHash()
     private fun getHash()=processingHash(requireNotNull(candidate.processing))
-    val diagnostic=JSONObject().put("type","speakerarray-experimental-comparison").put("schemaVersion",1)
+    val diagnostic=run.put("type","speakerarray-experimental-comparison").put("schemaVersion",1)
         .put("candidateId",candidate.id).put("coefficientHash",coefficientHash).put("formalAccepted",false)
         .put("plan",plan.json()).put("settings",CalibrationRepository.settings(config)).put("masterDb",original.masterDb)
         .put("swapped",original.swapped).put("startedAtEpochMs",System.currentTimeMillis())
