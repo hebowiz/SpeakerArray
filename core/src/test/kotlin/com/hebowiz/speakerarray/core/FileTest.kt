@@ -69,6 +69,17 @@ class FileTest {
         assertThrows(IllegalArgumentException::class.java) {WavDecoder.inspect(f)}
         assertThrows(IllegalArgumentException::class.java) {convert(wav(bits=32,format=3,values=doubleArrayOf(Double.NaN)))}
     }
+    @Test fun resamplingCanBeCancelledBetweenBoundedBlocks() {
+        val input=wav(rate=44100,values=DoubleArray(44100) {.1})
+        val output=temp.newFile();var checks=0
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            WavDecoder.convert(input,output,MonoMode.AVERAGE) {
+                if(++checks==2) throw java.util.concurrent.CancellationException("test")
+            }
+        }
+        assertEquals(2,checks)
+        assertTrue(output.length()<48000*4)
+    }
     @Test fun boundedReaderSeeksAndLoopsShortFiles() {
         val f=temp.newFile();val b=ByteBuffer.allocate(64*4).order(ByteOrder.LITTLE_ENDIAN)
         repeat(64) {b.putFloat(it.toFloat()/64)};f.writeBytes(b.array())

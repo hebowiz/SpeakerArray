@@ -554,3 +554,13 @@ debug APK、テストAPK、検証資料ZIP、チェックサム一覧の4資産�
 測定結果3件の保存と、そのうち1件のFIR生成成功を確認しました。新しいクラッシュはなく、既存候補5件と比較履歴も保持されています。共通出力はユーザー確認済みの−20 dBを保持し、成功した3回目のブースト上限は端末側で10 dBに変更されていました。条件・制約・APKハッシュは[修正と検証の報告](measurement-memory-fix.md)に記載しています。
 
 修正・回帰試験・報告はコミット`34bd51d8e4ebc849f61397ea55d40e536c1958ee`として`origin/feat/android-speaker-array`へpush済みです。同コミットを指す[メモリ不足修正Release](https://github.com/hebowiz/SpeakerArray/releases/tag/measurement-memory-fix-20261108)へ、debug APK・テストAPK・検証資料ZIP・チェックサム一覧を掲載しました。GitHub APIで4資産の`uploaded`状態、サイズ、SHA-256一致を確認しました。資料ZIPは2,532,633バイト、SHA-256は`1feed9e8167369b1873a4db833fea55b1b2e76d692e1cdf685cc53a4652a0f72`です。専用エミュレーターは終了しています。
+
+### MP3・FLACなどの音声ファイル対応（2026-11-08）
+
+WAV以外の音源も使いたいという依頼に対応しました。Android標準のMediaExtractor・MediaCodecで音声を逐次デコードし、既存のモノラル化・48 kHz変換・通常再生へ渡します。画面は「音声ファイル」に変更しました。既存の設定識別子`WAV`・`wavUri`、WAVのPCM16/24/32・float32読込、FIR／位相・振幅の処理は維持しています。[操作と制約](audio-files.md)に対応範囲を記載しました。
+
+最終ソースでJVM 103件、API 27の無音エミュレーターでAndroid 5件が成功しました。自作したWAV・MP3・FLAC・M4A・AAC・Ogg Vorbis・Opusの7形式を実デコードし、48 kHz化、左右選択・平均化、振幅・チャンネル分離を確認しています。24-bit FLAC、破損ファイルと6ch入力の拒否、変換取消、一時ファイルの解放も検証しました。アプリ試験では設定復元、左右選択変更、読込失敗時の旧音源保持、連続選択、ファイル選択ボタンの表示、MP3の通常再生・シーク・ループ、補正切替時の読込位置継続を確認しました。
+
+初回試験では、EOF時の`sampleFlags=-1`を暗号化フラグと誤判定する不具合と、API 27でMP3のfloat出力を強制した際の標準デコーダーのネイティブクラッシュを検出しました。EOF確認を先に行い、デコーダーの標準PCM形式を使うよう修正しました。古いFLAC Extractorが返すPCMも再解釈せず、その形式を維持します。修正後に全5件が成功しています。Lintはエラー0件・既存の依存更新警告5件です。
+
+debug APKのSHA-256は`384596f8fa9c7ddd3422666ba0a3520ed2dc0bf3d5182e3ee3562661a32e1da6`、androidTest APKは`94a341ac559efa6090235854950ee5636db8d00788b67c2659ea75e4ac421da2`です。versionName `0.1.0`、versionCode `1`は従来どおりです。今回の実機へのインストール・操作・音出しは行っていません。RFMonitorにもアクセスしていません。

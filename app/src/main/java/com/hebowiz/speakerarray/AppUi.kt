@@ -50,7 +50,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
         var csvRate by remember { mutableStateOf("48000") }
         val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             if(uri != null) {
-                if(fileAction == "wav") vm.loadWav(uri) else scope.launch {
+                if(fileAction == "audio") vm.loadAudio(uri) else scope.launch {
                     try {
                         val text = withContext(Dispatchers.IO) {
                             context.contentResolver.openInputStream(uri)!!.bufferedReader().use { r ->
@@ -90,7 +90,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
                 HorizontalDivider()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     when(if(vm.autoBusy) 3 else vm.tab) {
-                        0 -> Playback(vm, {mapping=true}, {fileAction="wav";open.launch(arrayOf("audio/*","application/octet-stream"))})
+                        0 -> Playback(vm, {mapping=true}, {fileAction="audio";open.launch(arrayOf("audio/*","application/ogg","application/octet-stream"))})
                         1 -> FirEditor(vm, {fileAction="fir";open.launch(arrayOf("application/json","text/*","application/octet-stream"))}, {export(true)})
                         2 -> Theory(vm)
                         else -> AutoFirPage(vm) {text->exportText=text;save.launch("SpeakerArray-measurement.json")}
@@ -170,9 +170,9 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
                 Text("左 ${fmt(status.leftDb)} / 右 ${fmt(status.rightDb)} dBFS",fontFamily=FontFamily.Monospace,fontSize=12.sp)
             }
             Column(Modifier.widthIn(min=180.dp,max=340.dp)) {
-                Text(if(vm.loading) "WAV読込中・停止" else if(status.playing && status.generation != vm.generation) "設定切替中・非定常" else status.message,fontSize=12.sp)
+                Text(if(vm.loading) "音声ファイル読込中・停止" else if(status.playing && status.generation != vm.generation) "設定切替中・非定常" else status.message,fontSize=12.sp)
                 Text("${status.route} / 処理48 kHz",fontSize=11.sp)
-                Text("クリップ ${status.clips}  出力不足 ${status.underruns}  WAV不足 ${status.wavUnderruns}",fontSize=11.sp,color=if(status.clips>0) RightOrange else Color.LightGray)
+                Text("クリップ ${status.clips}  出力不足 ${status.underruns}  音源読込不足 ${status.wavUnderruns}",fontSize=11.sp,color=if(status.clips>0) RightOrange else Color.LightGray)
             }
         }
     }
@@ -284,11 +284,12 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
                     Toggle("反復",src.loop) {v ->vm.source {it.copy(loop=v)}}
                 }
                 SourceKind.WAV -> {
-                    Button(onClick=wav) {Text("WAVを選択")}
-                    Text(if(src.wavUri.isEmpty()) "未選択" else Uri.parse(src.wavUri).lastPathSegment ?: "WAV",maxLines=2,fontSize=12.sp)
+                    Button(onClick=wav) {Text("音声ファイルを選択")}
+                    Text("WAV・MP3・FLAC・M4A/AAC・Oggなど",fontSize=12.sp)
+                    Text(if(src.wavUri.isEmpty()) "未選択" else Uri.parse(src.wavUri).lastPathSegment ?: "音声ファイル",maxLines=2,fontSize=12.sp)
                     FlowRow {MonoMode.entries.forEach {m ->FilterChip(src.mono==m,{vm.source {it.copy(mono=m)}},label={Text(when(m) {MonoMode.AVERAGE -> "(L+R)/2";MonoMode.LEFT -> "L採用";MonoMode.RIGHT -> "R採用"})})}}
                     Text("(L+R)/2では逆相成分が相殺される場合があります。",fontSize=12.sp)
-                    Slider(vm.audio.position.toFloat(),{vm.engine.seek(it.toDouble())},modifier=Modifier.semantics {contentDescription="WAVシーク"})
+                    Slider(vm.audio.position.toFloat(),{vm.engine.seek(it.toDouble())},modifier=Modifier.semantics {contentDescription="音声ファイルシーク"})
                     Toggle("ループ",src.loop) {v ->vm.source {it.copy(loop=v)}}
                     Toggle("ループ端5 msクロスフェード",src.loopFade) {v ->vm.source {it.copy(loopFade=v)}}
                 }
@@ -316,7 +317,7 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
     NumberControl("下限／開始",vm.session.source.low,"Hz",1.0..23999.0,vm::stop,slider=false,digits=0) {v ->vm.source {it.copy(low=v)}}
     NumberControl("上限／終了",vm.session.source.high,"Hz",1.0..23999.0,vm::stop,slider=false,digits=0) {v ->vm.source {it.copy(high=v)}}
 }
-fun sourceName(k: SourceKind) = when(k) {SourceKind.SINE->"正弦波";SourceKind.WHITE->"白色ノイズ";SourceKind.PINK->"ピンクノイズ";SourceKind.SWEEP->"スイープ";SourceKind.WAV->"WAV"}
+fun sourceName(k: SourceKind) = when(k) {SourceKind.SINE->"正弦波";SourceKind.WHITE->"白色ノイズ";SourceKind.PINK->"ピンクノイズ";SourceKind.SWEEP->"スイープ";SourceKind.WAV->"音声ファイル"}
 fun firName(m: FirMode) = when(m) {FirMode.FLAT->"フラット";FirMode.EQ->"グラフィックEQ";FirMode.COEFFICIENTS->"係数";else->m.name}
 
 @Composable private fun FirEditor(vm: AppViewModel, load: () -> Unit, save: () -> Unit) {

@@ -79,7 +79,7 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
                 port.check()
                 if(stopRequested && gain<=0) {finish(reason);false} else {
                     source.render(l,r,settings.source.frequency,0.0,quadrature=prepared.sineQuadrature)
-                    check(fileSource?.error==null) {"WAV読込エラー"}
+                    check(fileSource?.error==null) {"音声ファイル読込エラー"}
                     check((l.asSequence()+r.asSequence()).all {it.isFinite() && abs(it)<=1.0}) {"音源ピークが検証範囲を超えました"}
                     engine.process(l,r,out,initial.masterDb,initial.swapped)
                     check(engine.clips==0L) {"再生ピーク上限を超えました"}
@@ -111,7 +111,7 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
             if (old != null && old != device.id) { stop("出力先変更・停止"); routeChanged() }
         }
         try {
-            val fileSource = if (initial.source.kind == SourceKind.WAV) WavSource(requireNotNull(wavFile) { "WAVを選択してください" }, initial.source.loop, initial.source.loopFade) else null
+            val fileSource = if (initial.source.kind == SourceKind.WAV) WavSource(requireNotNull(wavFile) { "音声ファイルを選択してください" }, initial.source.loop, initial.source.loopFade) else null
             wav = fileSource
             val source = SourceEngine(initial.source, fileSource)
             val left = DoubleArray(BLOCK); val right = DoubleArray(BLOCK); val out = FloatArray(BLOCK*2); val envelope = DoubleArray(BLOCK)

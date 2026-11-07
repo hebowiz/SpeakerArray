@@ -47,9 +47,9 @@ object WavDecoder {
         return signed.toDouble()/2.0.pow(bits-1)
     }
     /** Bounded decode cache and 96-tap Blackman sinc resampling, performed before playback. */
-    fun convert(input: File, output: File, mono: MonoMode): Long {
+    fun convert(input: File, output: File, mono: MonoMode, checkCancelled: ()->Unit = {}): Long {
         val info = inspect(input)
-        require(info.frames.toDouble()/info.rate <= 7200) { "初期版のWAV上限は2時間です" }
+        require(info.frames.toDouble()/info.rate <= 7200) { "音声ファイルの時間上限は2時間です" }
         val frames = ceil(info.frames.toDouble()*SAMPLE_RATE/info.rate).toLong()
         RandomAccessFile(input, "r").use { file ->
             val cache = ByteArray(8192*info.frameBytes); var cacheStart = -1L; var cacheFrames = 0
@@ -81,7 +81,7 @@ object WavDecoder {
                     }.also { h -> val sum = h.sum(); for (k in h.indices) h[k] /= sum }
                 }
                 for (i in 0 until frames) {
-                    if (i%4096 == 0L && Thread.currentThread().isInterrupted) throw InterruptedIOException()
+                    if (i%4096 == 0L) {checkCancelled();if(Thread.currentThread().isInterrupted) throw InterruptedIOException()}
                     val x = i*ratio; val base = floor(x).toLong()
                     var value = 0.0
                     if (info.rate == SAMPLE_RATE) value = sample(i) else {

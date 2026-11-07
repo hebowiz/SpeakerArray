@@ -5,6 +5,7 @@ import kotlin.math.*
 const val SAMPLE_RATE = 48000
 const val BLOCK = 256
 val EQ_HZ = listOf(63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 12000.0, 16000.0)
+// WAV is the persisted token for every imported audio file; keep old session JSON compatible.
 enum class SourceKind { SINE, WHITE, PINK, SWEEP, WAV }
 enum class FirMode { FLAT, EQ, LPF, HPF, BPF, COEFFICIENTS }
 enum class MonoMode { AVERAGE, LEFT, RIGHT }

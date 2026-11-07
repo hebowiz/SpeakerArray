@@ -82,8 +82,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var wavFile: File? = null
     private var wavKey = ""
     private val cacheCleanup = viewModelScope.async(Dispatchers.IO) {
-        // Only this app's generated WAV caches; no user-selected documents are deleted.
-        app.cacheDir.listFiles()?.filter { it.isFile && (it.name.startsWith("wav-import") || it.name.startsWith("wav-48000")) }?.forEach { it.delete() }
+        // Only this app's generated audio caches; no user-selected documents are deleted.
+        app.cacheDir.listFiles()?.filter { it.isFile && (it.name.startsWith("wav-import") || it.name.startsWith("wav-48000") || it.name.startsWith("audio-import-") || it.name.startsWith("audio-decoded-")) }?.forEach { it.delete() }
     }
     var soloSide by mutableStateOf<Boolean?>(null); private set
     var appliedMode by mutableStateOf(CorrectionMode.FIR); private set
@@ -113,7 +113,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         experimentalStatus=session.experiments.current()?.let {if(!it.playable) "生成失敗: ${it.error}" else if(it.comparisons.isNotEmpty()) "比較結果あり（過去）・現在の効果は未検証" else "生成済み・未検証"} ?: "候補なし"
         draft = channel().fir
         scheduleProcessing(); previewDraft()
-        if (session.source.wavUri.isNotBlank()) loadWav(Uri.parse(session.source.wavUri), false)
+        if (session.source.wavUri.isNotBlank()) loadAudio(Uri.parse(session.source.wavUri), false)
     }
     fun notify(text: String) { message = text }
     fun dismissMessage() { message = "" }
@@ -157,7 +157,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val next = change(old)
         runCatching { next.validate() }.onFailure { notify(it.message ?: "音源設定が不正です"); return }
         if (old.mono != next.mono && next.wavUri.isNotBlank()) {
-            loadWav(Uri.parse(next.wavUri), false, next.mono)
+            loadAudio(Uri.parse(next.wavUri), false, next.mono)
             return
         }
         if (old.copy(frequency=next.frequency) != next) stop()
@@ -175,7 +175,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             engine.requestedOutput=routes.resolve(session.autoFir.output,false)
         } catch(e: Exception) {message=e.message ?: "出力先を選択してください";return}
         if (loading || prepared?.generation != generation) { message = "設定の準備が完了するまでお待ちください"; return }
-        if (session.source.kind == SourceKind.WAV && wavFile == null) { message = "WAVを選択してください"; return }
+        if (session.source.kind == SourceKind.WAV && wavFile == null) { message = "音声ファイルを選択してください"; return }
         engine.settings = session
         try {
             if(maintainingRoute) engine.startRetained(prepared!!,wavFile,requireNotNull(heldAudio))
@@ -297,8 +297,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val s = SessionRepository.decode(text)
             wavJob?.cancel(); wavGeneration++; loading = false
             stop();releaseHeldRoute();soloSide=null;engine.soloSide=null; needsMapping = true; update { s }; selectSide(false)
-            wavFile = null; wavKey = ""
-            if (s.source.wavUri.isNotBlank()) loadWav(Uri.parse(s.source.wavUri), false)
+            val previous=wavFile;wavFile = null; wavKey = ""
+            viewModelScope.launch(Dispatchers.IO) {previous?.delete()}
+            if (s.source.wavUri.isNotBlank()) loadAudio(Uri.parse(s.source.wavUri), false)
         } catch (e: Exception) { message = "読込を中止しました。設定は保持されています: ${e.message}" }
     }
     fun importFir(text: String, rate: Int?) {
@@ -309,38 +310,45 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try { val f = SessionRepository.pasteCoefficients(text,session.processing.length); editFir { f } }
         catch (e: Exception) { message = "係数が不正です: ${e.message}" }
     }
-    fun loadWav(uri: Uri, persistPermission: Boolean = true, mono: MonoMode = session.source.mono) {
+    fun loadAudio(uri: Uri, persistPermission: Boolean = true, mono: MonoMode = session.source.mono) {
         if(autoBusy) return
-        stop(); wavJob?.cancel(); loading = true
+        stop(); val previousJob=wavJob;previousJob?.cancel(); loading = true
         val request = ++wavGeneration
         val key = "$uri/$mono"
         wavJob = viewModelScope.launch {
+            var pendingFile: File?=null
             try {
+                previousJob?.join()
                 val app = getApplication<Application>()
                 cacheCleanup.await()
                 if (persistPermission) app.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 if (wavKey != key || wavFile?.exists() != true) {
                     val file = withContext(Dispatchers.IO) {
-                        val input = File.createTempFile("wav-import", ".wav",app.cacheDir)
+                        val input = File.createTempFile("audio-import-", ".bin",app.cacheDir)
                         val output = File.createTempFile("wav-48000", ".pcm",app.cacheDir)
+                        pendingFile=output
                         try {
                             app.contentResolver.openInputStream(uri)!!.use { src -> input.outputStream().use { dest ->
                                 val bytes = ByteArray(65536); var total = 0L
-                                while (true) { ensureActive(); val n = src.read(bytes); if(n < 0) break; total += n; require(total <= 1_073_741_824L) { "WAVの読込上限は1 GiBです" }; dest.write(bytes,0,n) }
+                                while (true) { ensureActive(); val n = src.read(bytes); if(n < 0) break; total += n; require(total <= AudioFileDecoder.MAX_INPUT_BYTES) { "音声ファイルの読込上限は1 GiBです" }; dest.write(bytes,0,n) }
                             } }
-                            WavDecoder.convert(input,output,mono); output
+                            val context=coroutineContext
+                            AudioFileDecoder.convert(input,output,mono) {context.ensureActive()}; output
                         } catch(e: Exception) { output.delete(); throw e } finally { input.delete() }
                     }
                     ensureActive()
                     val previous = wavFile
-                    wavFile = file; wavKey = key
+                    wavFile = file; wavKey = key;pendingFile=null
                     viewModelScope.launch(Dispatchers.IO) { previous?.delete() }
                 }
                 update { it.copy(source=it.source.copy(wavUri=uri.toString(),mono=mono)) }
-                message = "WAVを48 kHzで準備しました。再生は停止中です"
+                message = "音声ファイルを48 kHzで準備しました。再生は停止中です"
             } catch(e: CancellationException) { throw e }
-            catch(e: Exception) { message = "WAVを読み込めません。参照切れの場合は再選択してください: ${e.message}" }
-            finally { if (request == wavGeneration) loading = false }
+            catch(e: Exception) { message = "音声ファイルを読み込めません。未対応形式・破損・参照切れを確認してください: ${e.message}" }
+            finally {
+                withContext(NonCancellable+Dispatchers.IO) {pendingFile?.delete()}
+                if (request == wavGeneration) loading = false
+            }
         }
     }
     fun autoSettings(change: (AutoFirSettings)->AutoFirSettings) {
