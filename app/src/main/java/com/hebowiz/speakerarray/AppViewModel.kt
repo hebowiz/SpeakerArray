@@ -9,6 +9,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hebowiz.speakerarray.core.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import org.json.JSONObject
 
@@ -73,6 +75,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var prepareJob: Job? = null
     private var draftJob: Job? = null
     private var saveJob: Job? = null
+    private val serializationMutex=Mutex()
     private var previewJob: Job? = null
     private var wavJob: Job? = null
     private var wavGeneration = 0L
@@ -274,7 +277,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun persist() {
         saveJob?.cancel(); val snapshot = session
-        saveJob = viewModelScope.launch(Dispatchers.IO) { delay(250); prefs.edit().putString("last",SessionRepository.encode(snapshot)).apply() }
+        saveJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(250)
+            try {
+                serializationMutex.withLock {
+                    ensureActive()
+                    val encoded=SessionRepository.encode(snapshot)
+                    ensureActive()
+                    // Finish the previous disk write before allowing another large serialization.
+                    check(prefs.edit().putString("last",encoded).commit()) {"設定の保存に失敗しました"}
+                }
+            } catch(e: CancellationException) {throw e}
+            catch(e: Exception) {withContext(Dispatchers.Main) {notify("設定の保存に失敗しました: ${e.message}")}}
+        }
     }
     fun loadSession(text: String) {
         if(autoBusy) return
@@ -431,17 +446,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(NonCancellable) {
                 try {
                 if(autoEpoch==id) {
-                    autoDiagnostic=(measurement?.finalDiagnostics() ?: JSONObject().put("type","speakerarray-diagnostic").put("schemaVersion",2))
+                    autoDiagnostic=withContext(Dispatchers.IO) {serializationMutex.withLock {
+                        val encoded=(measurement?.finalDiagnostics() ?: JSONObject().put("type","speakerarray-diagnostic").put("schemaVersion",2))
                         .put("generation",id).put("stage",autoProgress.stage.name).put("detail",autoProgress.detail)
                         .put("requested",measurementRoute.requested).put("actual",measurementRoute.actual)
                         .put("pcm",measurementRoute.pcm).put("effects",measurementRoute.effects)
                         .put("recordedFrames",measurementRoute.frames).put("clips",measurementRoute.clips)
                         .put("settings",CalibrationRepository.settings(resolved)).put("masterDb",backup.masterDb)
-                        .apply {if(!has("reasonCode")) put("reasonCode",if(autoProgress.stage==AutoStage.CANCELLED) "CANCELLED" else MeasurementResultStore.failureCode(autoProgress.detail))}.toString(2)
+                        .apply {if(!has("reasonCode")) put("reasonCode",if(autoProgress.stage==AutoStage.CANCELLED) "CANCELLED" else MeasurementResultStore.failureCode(autoProgress.detail))}.toString()
+                        check(prefs.edit().putString("autoDiagnostic",encoded).commit()) {"診断の保存に失敗しました"}
+                        encoded
+                    }}
                     analysisJson=autoDiagnostic
-                    val savedDiagnostic=autoDiagnostic
-                    withContext(Dispatchers.IO) {prefs.edit().putString("autoDiagnostic",savedDiagnostic).apply()}
                 }
+                } catch(e: Exception) {notify("診断の保存に失敗しました: ${e.message}")
                 } finally {
                 withContext(Dispatchers.IO) {if(!retained) measurement?.audio?.close()}
                 if(autoEpoch==id) {autoBusy=false;autoJob=null;measurementDeviceIds=null;if(autoProgress.stage!=AutoStage.APPLIED) {scheduleProcessing();previewDraft()}}
@@ -507,8 +525,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             d.has("reasonCode") -> d.getString("reasonCode")
                             else -> MeasurementResultStore.failureCode(autoProgress.detail)
                         })
-                        autoDiagnostic=d.toString(2);analysisJson=autoDiagnostic
-                        withContext(Dispatchers.IO) {prefs.edit().putString("autoDiagnostic",autoDiagnostic).apply()}
+                        autoDiagnostic=withContext(Dispatchers.IO) {serializationMutex.withLock {
+                            val encoded=d.toString()
+                            check(prefs.edit().putString("autoDiagnostic",encoded).commit()) {"診断の保存に失敗しました"}
+                            encoded
+                        }}
+                        analysisJson=autoDiagnostic
+                    } catch(e: Exception) {notify("診断の保存に失敗しました: ${e.message}")
                     } finally {
                         withContext(Dispatchers.IO) {if(!retained) runner?.audio?.close()}
                         if(autoEpoch==id) {autoBusy=false;autoJob=null;measurementDeviceIds=null;if(!retained) {scheduleProcessing();previewDraft()}}

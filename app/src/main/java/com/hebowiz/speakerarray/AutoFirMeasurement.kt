@@ -32,7 +32,11 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
         .put("thresholds",MeasurementResultStore.thresholds()).put("settings",CalibrationRepository.settings(config))
         .put("sampleRateHz",SAMPLE_RATE).put("transferOrder",JSONArray(listOf("L1","L2","R1","R2")))
         .put("masterDb",original.masterDb).put("frequencyStepHz",SAMPLE_RATE.toDouble()/TransferEstimator.SIZE)
-        .put("originalSession",JSONObject(SessionRepository.encode(original.copy(calibration=null))))
+        // Diagnostic provenance needs measurement/playback settings, not copies of every prior run.
+        .put("originalSession",JSONObject(SessionRepository.encode(original.copy(calibration=null,experiments=ExperimentalLibrary()))))
+        .put("originalExperimentalState",JSONObject().put("selected",original.experiments.selected ?: JSONObject.NULL)
+            .put("applied",original.experiments.applied ?: JSONObject.NULL)
+            .put("candidates",JSONArray(original.experiments.candidates.map {c->JSONObject().put("id",c.id).put("coefficientHash",c.coefficientHash ?: JSONObject.NULL)})))
         .put("analyzable",false).put("trialEligible",false).put("applicable",false)
     private fun progress(value: AutoProgress) {diagnostics.put("currentStage",value.stage.name);onProgress(value)}
     private data class Shot(val tag: String, val pilotStart: Long, val signalStart: Long, val pilotEnd: Long, val signal: DoubleArray)

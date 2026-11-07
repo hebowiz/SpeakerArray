@@ -15,10 +15,27 @@ object SessionRepository {
     internal fun processing(p: Processing) = obj("length" to p.length, "left" to channel(p.left), "right" to channel(p.right), "delayUs" to p.delayUs, "phaseDeg" to p.phaseDeg)
     internal fun readProcessing(o: JSONObject) = Processing(o.getInt("length"), readChannel(o.getJSONObject("left")), readChannel(o.getJSONObject("right")), o.getDouble("delayUs"), o.getDouble("phaseDeg")).also { it.validate() }
     fun encode(s: Session): String {
+        val out=java.io.StringWriter()
+        write(s,out)
+        return out.toString()
+    }
+    fun write(s: Session, out: java.io.Writer) {
         s.validate()
+        // Histories dominate the session size. Materialize only one candidate at a time.
+        val root=sessionObject(s)
+        out.write("{")
+        val keys=root.keys()
+        while(keys.hasNext()) {
+            val key=keys.next()
+            out.write(JSONObject.quote(key));out.write(":");CompactJson.write(root.get(key),out);out.write(",")
+        }
+        out.write("\"experiments\":")
+        ExperimentalRepository.writeLibrary(s.experiments,out)
+        out.write("}")
+    }
+    private fun sessionObject(s: Session): JSONObject {
         val src = s.source
         return obj("type" to "speakerarray-session", "schemaVersion" to 5, "sampleRateHz" to SAMPLE_RATE,
-            "experiments" to ExperimentalRepository.library(s.experiments),
             "autoFir" to CalibrationRepository.settings(s.autoFir), "calibration" to s.calibration?.let {CalibrationRepository.profile(it)},
             "adjustmentMethod" to s.adjustmentMethod.name,"autoToneHz" to s.autoToneHz,"toneProfile" to s.toneProfile?.let {tone(it)},
             "correctionMode" to s.correctionMode.name, "simple" to simple(s.simple),
@@ -30,7 +47,7 @@ object SessionRepository {
             "a" to s.a?.let { processing(it) }, "b" to s.b?.let { processing(it) },
             "source" to obj("kind" to src.kind.name, "frequency" to src.frequency, "bandLimit" to src.bandLimit,
                 "low" to src.low, "high" to src.high, "sweepSeconds" to src.sweepSeconds, "logarithmic" to src.logarithmic,
-                "loop" to src.loop, "wavUri" to src.wavUri, "mono" to src.mono.name, "loopFade" to src.loopFade)).toString(2)
+                "loop" to src.loop, "wavUri" to src.wavUri, "mono" to src.mono.name, "loopFade" to src.loopFade))
     }
     private fun header(o: JSONObject, type: String) {
         require(o.getString("type") == type) { "ファイル種別が違います（$type が必要です）" }

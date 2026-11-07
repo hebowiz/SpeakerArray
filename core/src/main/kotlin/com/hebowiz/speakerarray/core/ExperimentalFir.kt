@@ -211,6 +211,28 @@ object ExperimentalFir {
 }
 
 object ExperimentalRepository {
+    fun writeLibrary(v: ExperimentalLibrary, out: java.io.Writer) {
+        out.write("{\"candidates\":[")
+        v.candidates.forEachIndexed {i,c->
+            if(i>0) out.write(",")
+            // Each comparison can contain large spectra. Do not parse all three simultaneously.
+            val header=candidate(c.copy(comparisons=emptyList()))
+            header.remove("comparisons")
+            out.write("{")
+            val keys=header.keys()
+            while(keys.hasNext()) {
+                val key=keys.next()
+                out.write(JSONObject.quote(key));out.write(":");CompactJson.write(header.get(key),out);out.write(",")
+            }
+            out.write("\"comparisons\":[")
+            c.comparisons.forEachIndexed {j,raw->if(j>0) out.write(",");CompactJson.write(JSONObject(raw),out)}
+            out.write("]}")
+        }
+        out.write("],\"selected\":");CompactJson.write(v.selected,out)
+        out.write(",\"applied\":");CompactJson.write(v.applied,out)
+        out.write(",\"undo\":");CompactJson.write(v.undo?.let(::JSONObject),out)
+        out.write("}")
+    }
     fun candidate(c: ExperimentalCandidate): JSONObject=JSONObject().put("id",c.id).put("sourceHash",c.sourceHash).put("method",c.method)
         .put("settings",CalibrationRepository.settings(c.settings)).put("masterDb",c.masterDb)
         .put("processing",c.processing?.let {SessionRepository.processing(it)} ?: JSONObject.NULL).put("coefficientHash",c.coefficientHash ?: JSONObject.NULL)
