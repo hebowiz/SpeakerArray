@@ -572,3 +572,5 @@ debug APKのSHA-256は`384596f8fa9c7ddd3422666ba0a3520ed2dc0bf3d5182e3ee3562661a
 ユーザーが指定したWi-Fi ADB接続先のXQ-FS44へ、音声ファイル対応版を`install -r`で更新インストールしました。既存データを保持する更新で、ADBは`Success`で終了しています。端末側のversionName `0.1.0`、versionCode `1`、更新日時`2026-11-08 08:55:30`を確認しました。
 
 端末から導入済みの`base.apk`を取得し、SHA-256が`384596f8fa9c7ddd3422666ba0a3520ed2dc0bf3d5182e3ee3562661a32e1da6`で、上記の検証済みAPKおよびRelease掲載版と一致することを確認しました。今回は更新インストールと導入確認のみで、アプリ起動・設定操作・音出し・測定は行っていません。
+
+このインストール記録はコミット`2df0eea`として`origin/feat/android-speaker-array`へpush済みです。
