@@ -28,7 +28,7 @@ data class Session(val processing: Processing = Processing(), val source: Source
     val correctionA: CorrectionSnapshot? = null, val correctionB: CorrectionSnapshot? = null,
     val externalLayouts: Map<String,SpeakerLayout> = emptyMap(),
     val adjustmentMethod: AdjustmentMethod = AdjustmentMethod.FIR, val autoToneHz: Double = source.frequency,
-    val toneProfile: ToneProfile? = null) {
+    val toneProfile: ToneProfile? = null, val experiments: ExperimentalLibrary = ExperimentalLibrary()) {
     val externalOutput get() = RoutePolicy.external(autoFir.output?.type)
     val layoutKey get() = autoFir.output?.let {"${it.type}/${it.name}/${it.address}"} ?: "builtin"
     val activeLayout get() = if(externalOutput) externalLayouts[layoutKey] else SpeakerLayout(spacingMm)
@@ -49,6 +49,7 @@ fun Processing.validate() {
     }
 }
 fun Session.validate() {
+    experiments.validate()
     autoFir.validate()
     finiteRange(autoToneHz,20.0,20000.0,"自動調整周波数 Hz")
     toneProfile?.simple?.validate()
@@ -60,7 +61,7 @@ fun Session.validate() {
     finiteRange(soundSpeed, 250.0, 400.0, "音速 m/s")
     finiteRange(evaluationHz, 20.0, 20000.0, "評価周波数 Hz")
     source.validate()
-    listOfNotNull(a, b).forEach { it.validate(); require(it.length == processing.length) { "A/BのFIR長が一致しません" } }
+    listOfNotNull(a, b).forEach { it.validate() }
 }
 fun SourceSettings.validate() {
     finiteRange(frequency, 20.0, 20000.0, "周波数 Hz")

@@ -30,6 +30,7 @@ import kotlin.math.*
 }
 
 @Composable fun AutoFirPage(vm: AppViewModel, export: (String)->Unit) {
+    if(vm.experimentalPage) {ExperimentalFirPage(vm,export);return}
     val context=LocalContext.current
     var permissionsRevision by remember {mutableIntStateOf(0)}
     val permissions=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {permissionsRevision++}
@@ -43,6 +44,7 @@ import kotlin.math.*
     var advanced by remember {mutableStateOf(false)}
     Column(Modifier.fillMaxSize().padding(horizontal=8.dp)) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick={vm.experimentalPage=true},enabled=!busy) {Text("実験用FIR")}
             Button(onClick=vm::startAuto,enabled=!busy && permitted && !vm.loading && blockReason==null) {Text("自動調整")}
             OutlinedButton(onClick={vm.cancelAuto()},enabled=busy) {Text("取消")}
             if(!permitted) OutlinedButton(onClick={permissions.launch(required.toTypedArray())},enabled=!busy) {Text("MIC・Bluetooth権限を許可")}

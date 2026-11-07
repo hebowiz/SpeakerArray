@@ -256,7 +256,9 @@ data class FirSolution(val processing: Processing, val predictedDb: Double, val 
 
 /** Real causal finite-dimensional least squares, solved with a Toeplitz FFT normal operator. */
 object AutoFirDesigner {
+    internal val designInvocations=java.util.concurrent.atomic.AtomicLong()
     fun design(pair: MeasuredPair, settings: AutoFirSettings, masterDb: Double, check: () -> Unit = {}): FirSolution {
+        designInvocations.incrementAndGet()
         val n=TransferEstimator.SIZE; val taps=settings.taps; val delay=taps/2
         val ref=if(settings.referenceRight) pair.right else pair.left
         val correction=if(settings.referenceRight) pair.left else pair.right

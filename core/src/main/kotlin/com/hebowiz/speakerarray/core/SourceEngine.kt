@@ -3,7 +3,7 @@ package com.hebowiz.speakerarray.core
 import kotlin.math.*
 import java.util.Random
 
-class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = null) {
+class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = null, private val periodic: DoubleArray? = null) {
     private val random = Random(0x53504541)
     private var phase = 0.0
     private var frequency = settings.frequency
@@ -15,7 +15,7 @@ class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = n
     private val band = if (settings.bandLimit) FirDesigner.design(FirSpec(FirMode.BPF, low=settings.low, high=settings.high), 257) else doubleArrayOf(1.0)
     private val wavBlock = DoubleArray(BLOCK)
     var finished = false; private set
-    init { settings.validate() }
+    init { settings.validate();require(periodic==null || (periodic.isNotEmpty() && periodic.all {it.isFinite() && abs(it)<=1.0})) }
     fun render(left: DoubleArray, right: DoubleArray, targetHz: Double, targetPhaseDeg: Double, quadrature: Boolean = false) {
         if (settings.kind == SourceKind.WAV) { wav?.read(wavBlock); finished = wav?.finished ?: true }
         for (i in 0 until BLOCK) {
@@ -24,7 +24,7 @@ class SourceEngine(val settings: SourceSettings, private val wav: WavSource? = n
             while (delta > PI) delta -= 2*PI
             while (delta < -PI) delta += 2*PI
             relative += delta/240
-            val sample = when (settings.kind) {
+            val sample = periodic?.let {it[(elapsed%it.size).toInt()]} ?: when (settings.kind) {
                 SourceKind.SINE -> sin(phase)
                 SourceKind.WHITE, SourceKind.PINK -> {
                     val white = random.nextDouble()*2-1

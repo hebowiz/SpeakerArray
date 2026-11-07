@@ -348,3 +348,76 @@ debug APKは`app/build/outputs/apk/debug/app-debug.apk`、versionNameは`0.1.0`�
 RFMonitorは読み取りだけで照合し、開始・終了のHEAD、Git状態、257ファイルすべてのSHA-256が一致しました。RFMonitorの編集・生成・ビルド・テスト・Git変更は行っていません。照合データと試験ログはSpeakerArrayの無視対象`build/fir-reuse-audit/`に保存しています。生MIC録音や端末固有情報を新たにGitへ追加していません。
 
 今回は実機へのインストール・端末操作・音出し・MIC録音・音響検証を行っていません。実機の単一周波数低減、広帯域FIR低減、BT出力の実証は未実施です。過去の準備後500〜1,000 Hzの3セッションは、試験用有効率78.82%、60.00%、74.12%で、全回に`PILOT_AMBIGUOUS`が残る不合格のままです。今回の修正では自動設計・自動探索の成功条件を変更していません。
+
+## 実験用FIRの生成と固定候補比較（2026-11-07）
+
+作業開始時のブランチは`feat/android-speaker-array`、HEADは`a578eb5f077779a7db27bef2281eb8f41aa00d2e`で、作業ツリーはクリーンでした。実装完了時点では、この節の変更は同HEADへの未コミット差分で、commit・pushは未実施でした。前節の保存FIR再利用修正と、そのpush済み記録は開始時HEADに含まれています。
+
+### 実装と保存データによる予測
+
+自動設計ページに実験用FIRの生成、固定候補の比較、JSON保存・取込、手動適用、元に戻す操作を追加しました。正式合格条件を変えず、有効率不足や条件を満たす`PILOT_AMBIGUOUS`の暫定応答から別枠の候補を作ります。生成と比較は両補正スロット、A/B、校正結果を保持します。手動適用だけがFIRを更新し、通常再生にMIC権限を要求しません。
+
+保存3セッションの各2反復を使い、集約・反復1→2・反復2→1の計9候補を同じcore設計器で生成しました。すべて1,025 taps、正則化0.01、最大ブースト6 dB、共通出力−24 dBで生成できました。設計ビンは51〜69個、ブースト上界は3.991〜4.368 dB、DSPピーク上界は0.1394〜0.1465です。基準をゼロ化せず、音量の自動低下や両ch共通減衰で成立させていません。
+
+交差候補の要求帯域全体での片側比予測は5.12〜5.53 dB、無補正両側比予測は9.21〜9.87 dBでした。低SNRビンを除外せずに計算しています。これは保存された暫定複素応答と有限長FIRによる予測で、実測低減量ではありません。共通時刻モデルを両反復で共有するため、完全独立な検証とも呼びません。元の有効率78.82%、60.00%、74.12%と、`timing.reliable=false`、`PILOT_AMBIGUOUS`はそのままです。
+
+元診断SHA-256、全候補ID、設定、成功・失敗、係数ハッシュ、設計ビン、有限長予測の全結果は[実験用FIRレポート](experimental-fir-report.md)と公開用CSVにまとめました。生PCMを再解析したとは扱っていません。元診断と候補JSONは無視対象の`build/experimental-audit/`などに置き、公開用CSVには端末名・アドレスを含めません。
+
+### テスト結果
+
+| 検証 | 結果 |
+|---|---|
+| JVM | 92件成功。既存82件＋実験用FIRの追加10件 |
+| Python分析 | 既存2件成功 |
+| Android | 音声無効のAPI 27エミュレーターで25件成功。既存20件＋追加5件。再実行は重複計上していません |
+| APK | debug APK・テストAPKのビルド成功 |
+| Lint | エラー0件、依存関係の更新通知5件 |
+
+追加JVM試験では有効率不足と曖昧な同期での生成を許可しても、正式判定が変わらないことを確認しました。不正レート・配列・順序・時刻モデル・欠損・クリップ・経路異常、20ビン未満、非収束、ブースト超過、ピーク超過は拒否します。交差候補では評価側応答を変更しても設計重みと係数が変わらず、低SNRビンは全帯域の予測に残ります。保存形式4から5への読込、候補のハッシュ改変拒否、両スロットと復元用設定の保持も試験しています。
+
+電力試験では実際の`SourceEngine`・`DspEngine`から得たPCMを、反射を含む合成2経路へ通しました。そこから帯域電力を計算し、有限長FIR予測との差が1 dB以内であることを確認しています。比較前後で係数ハッシュが一致し、設計器の呼出しカウンターも増えません。既知の電力値だけを返す模擬メーターによる確認ではありません。
+
+無補正FIRで改善を作らず、補正chのミュートだけでは片側比のキャンセルを認めません。不適切な位相の増音を負値で保持し、部分帯域の改善と全帯域を分けます。ノイズ床では下限か評価不能を返します。3.217秒の固定遅延、200 ppmのクロック差、基準レベル変動、旧条件の取得範囲、係数変更、整定不足も試験しました。
+
+初期のPCM試験ではHann窓の位置により周期信号の評価エネルギーが変わり、2件失敗しました。評価を出力1周期の矩形窓へ変更して位置依存を解消し、再試験で成功しました。判定閾値を緩めて通したものではありません。最初のコンパイルで検出した配列要素の型変換も修正済みです。
+
+追加Android試験は、候補生成・手動適用・復元・JSON取込・MIC権限なしの通常再生、権限不足と即時取消、別プロセスへの保存と復元、無音時の比較中止を対象にしています。再起動試験は保存と復元の間に`am force-stop`を入れ、異なるPIDで復元したことを確認しました。比較不能時も候補と中止結果を保存し、両補正スロットを変更せず、録音・出力スレッドを終了します。横置きの予測グラフ、狭い画面の常設停止と取消、保存操作も確認しています。
+
+既存Android試験では保存FIR、単純補正との切替、単一周波数探索、保持ストリーム、校正表示、A/B、音声経路・PCM異常時の停止を再確認しました。本体SP＋HFP MICとBT出力時のMIC制限は既存のポリシーと回帰試験で維持しています。エミュレーターの無音録音から合格候補や音響低減結果を得たものではありません。物理的なBT切断や実際の音響整定は未確認です。
+
+実行した主なコマンドは次のとおりです。ADBはすべて専用の`emulator-5556`を指定しました。録音権限の解除はテスト間にホスト側で行っています。HFP実機試験クラスは実行していません。
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio1\jbr'
+.\gradlew.bat :core:test :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --console=plain
+.\gradlew.bat :core:experimentalFir --console=plain
+python tools/summarize_experimental.py build/experimental-audit/offline docs/analysis
+python -m unittest discover -s tools -p 'test_*.py'
+# 起動オプション: -avd SpeakerArrayTest -port 5556 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+adb -s emulator-5556 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5556 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+$runner='com.hebowiz.speakerarray.test/androidx.test.runner.AndroidJUnitRunner'
+$ex='com.hebowiz.speakerarray.ExperimentalAppTest'
+adb -s emulator-5556 shell pm revoke com.hebowiz.speakerarray android.permission.RECORD_AUDIO
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#generateApplyUndoImportAndPlaybackNeedNoMicAndPreserveBothSlots,$ex#comparisonPermissionFailureAndImmediateCancelsNeverApply" $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#seedExperimentalForProcessRestart" $runner
+adb -s emulator-5556 shell am force-stop com.hebowiz.speakerarray
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#restoreExperimentalInNewProcess" $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$ex#silentComparisonRejectsAbsentSignalAndGuiRetainsStopAndResults" $runner
+```
+
+既存20件は前節のクラス・メソッド構成で再実行しています。ログは`build/experimental-audit/regression-*.log`、追加試験の最終ログは同フォルダの`final-experimental-*.log`と`final-graph-and-silent.log`です。
+
+### APKとソースの識別、監査
+
+debug APKは`app/build/outputs/apk/debug/app-debug.apk`、versionNameは`0.1.0`、versionCodeは`1`です。SHA-256は`821938b861a8718faaf940ac69bae58fced23133a0d8dad09355bde3aac402d1`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`で、SHA-256は`b2b960ace19e857749c4ec51be68943f33461240ccc974cfa86d09a8651fb476`です。
+
+開始時HEADと今回の差分からビルドしました。最後のソース変更後にGradleのテスト・両APK・Lintを通し、表示変更の影響を受ける無音比較とGUI試験を再実行しています。その後は文書だけを更新しています。ソースと設定・分析ツール60ファイルのSHA-256一覧は、無視対象`build/experimental-audit/source-sha256.txt`に保存しました。一覧自体のSHA-256は`399817ed37697d724a6e7979374c56b0eebfcf9dc5b5791806a3af463e8f922c`です。対象は`app/src/`、`core/src/`、`gradle/`、`tools/`、`*.gradle.kts`、`gradle.properties`、`gradlew`、`gradlew.bat`で、文書は含めません。相対パスを昇順に並べ、各行を`SHA-256  相対パス`、UTF-8・LFで保存しています。
+
+RFMonitorは読み取りだけで照合しました。開始・終了のHEAD、Git状態、257ファイルすべてのSHA-256が一致しています。RFMonitorでの編集・生成・ビルド・テスト・Git変更は行っていません。監査結果はSpeakerArrayの`build/experimental-audit/rfmonitor-comparison.json`にあります。日本語ファイル名のGit表示を引用文字列として扱った最初の照合は読み取りに失敗したため、NUL区切りでパスを取得し直して確認しました。
+
+今回は実機へのインストール・端末操作・音出し・MIC録音を行っていません。実機の広帯域FIR低減量、再現性、実用化、BT出力の効果は未実証です。次段階で同じ設置と音量を保ち、まず固定候補の反復比較、その後に再測定・再設計した別候補の比較を行うための実装までを完了しています。
+
+### 実装完了後のUSBインストール（2026-11-07）
+
+実装完了後、ユーザーの依頼を受け、USB接続のXQ-FS44へ上記SHA-256のdebug APKを更新インストールしました。ADBの`install -r`は`Success`で終了し、端末側のversionName `0.1.0`、versionCode `1`、更新日時`2026-11-07 15:49:38`を確認しました。既存の設定・データを保持する更新で、アプリ起動・音出し・測定は行っていません。前段の実装・検証範囲と、この後続のインストールを区別して記録します。

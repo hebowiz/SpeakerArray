@@ -17,7 +17,8 @@ object SessionRepository {
     fun encode(s: Session): String {
         s.validate()
         val src = s.source
-        return obj("type" to "speakerarray-session", "schemaVersion" to 4, "sampleRateHz" to SAMPLE_RATE,
+        return obj("type" to "speakerarray-session", "schemaVersion" to 5, "sampleRateHz" to SAMPLE_RATE,
+            "experiments" to ExperimentalRepository.library(s.experiments),
             "autoFir" to CalibrationRepository.settings(s.autoFir), "calibration" to s.calibration?.let {CalibrationRepository.profile(it)},
             "adjustmentMethod" to s.adjustmentMethod.name,"autoToneHz" to s.autoToneHz,"toneProfile" to s.toneProfile?.let {tone(it)},
             "correctionMode" to s.correctionMode.name, "simple" to simple(s.simple),
@@ -33,7 +34,7 @@ object SessionRepository {
     }
     private fun header(o: JSONObject, type: String) {
         require(o.getString("type") == type) { "ファイル種別が違います（$type が必要です）" }
-        require(o.getDouble("schemaVersion") in (if(type=="speakerarray-session") listOf(1.0,2.0,3.0,4.0) else listOf(1.0))) { "未対応のschemaVersionです" }
+        require(o.getDouble("schemaVersion") in (if(type=="speakerarray-session") listOf(1.0,2.0,3.0,4.0,5.0) else listOf(1.0))) { "未対応のschemaVersionです" }
         require(o.getDouble("sampleRateHz") == SAMPLE_RATE.toDouble()) { "48 kHzの設定のみ対応します。FIRを再設計してください" }
     }
     fun decode(text: String): Session {
@@ -55,7 +56,7 @@ object SessionRepository {
                     correctionA=o.optJSONObject("correctionA")?.let {readSnapshot(it)},correctionB=o.optJSONObject("correctionB")?.let {readSnapshot(it)},
                     externalLayouts=o.getJSONObject("externalLayouts").let {layouts->layouts.keys().asSequence().associateWith {k->
                         val v=layouts.getJSONObject(k);SpeakerLayout(v.getDouble("spacingMm"),v.getBoolean("reversed"))}})
-            }.also { it.validate() }
+            }.let {it.copy(experiments=o.optJSONObject("experiments")?.let(ExperimentalRepository::readLibrary) ?: ExperimentalLibrary())}.also { it.validate() }
     }
     private fun simple(s: SimpleCorrection)=obj("left" to channel(s.left),"right" to channel(s.right),
         "sinePhaseDeg" to s.sinePhaseDeg,"sineDelayUs" to s.sineDelayUs,"delayUs" to s.delayUs,"referenceHz" to s.referenceHz)

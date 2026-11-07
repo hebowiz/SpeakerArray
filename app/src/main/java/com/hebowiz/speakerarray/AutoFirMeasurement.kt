@@ -28,6 +28,7 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
     val audio=MeasurementAudio(context,output,input,config,route)
     val diagnostics=JSONObject().put("type","speakerarray-diagnostic").put("schemaVersion",2)
         .put("thresholds",MeasurementResultStore.thresholds()).put("settings",CalibrationRepository.settings(config))
+        .put("sampleRateHz",SAMPLE_RATE).put("transferOrder",JSONArray(listOf("L1","L2","R1","R2")))
         .put("masterDb",original.masterDb).put("frequencyStepHz",SAMPLE_RATE.toDouble()/TransferEstimator.SIZE)
         .put("originalSession",JSONObject(SessionRepository.encode(original.copy(calibration=null))))
         .put("analyzable",false).put("trialEligible",false).put("applicable",false)

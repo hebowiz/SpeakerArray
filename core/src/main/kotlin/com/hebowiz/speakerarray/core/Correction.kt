@@ -28,7 +28,7 @@ data class CorrectionSnapshot(val mode: CorrectionMode, val fir: Processing, val
 data class SpeakerLayout(val spacingMm: Double = 150.0, val reversed: Boolean = false)
 fun Session.effectiveProcessing(): Processing = if(correctionMode==CorrectionMode.FIR) processing else simple.processing(processing.length,source.kind==SourceKind.SINE)
 fun Session.correctionSnapshot() = CorrectionSnapshot(correctionMode,processing,simple,source,calibration,toneProfile)
-fun Session.restore(s: CorrectionSnapshot) = copy(correctionMode=s.mode,processing=s.fir,simple=s.simple,source=s.source,calibration=s.calibration,toneProfile=s.toneProfile,a=if(processing.length==s.fir.length) a else null,b=if(processing.length==s.fir.length) b else null)
+fun Session.restore(s: CorrectionSnapshot) = copy(correctionMode=s.mode,processing=s.fir,simple=s.simple,source=s.source,calibration=s.calibration,toneProfile=s.toneProfile)
 fun Session.changeSource(next: SourceSettings): Session {
     next.validate()
     // Keep the original oscillator setting; conversion never replaces polarity with delay.

@@ -34,6 +34,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(false); private set
     var generation by mutableLongStateOf(0); private set
     var autoBusy by mutableStateOf(false); private set
+    var experimentalPage by mutableStateOf(false)
+    var experimentalStatus by mutableStateOf("候補なし"); private set
+    var experimentalData by mutableStateOf<ExperimentalInput?>(null); private set
+    var experimentalSettings by mutableStateOf<AutoFirSettings?>(null); private set
+    var experimentalMethod by mutableStateOf("aggregate")
+
     var autoProgress by mutableStateOf(AutoProgress()); private set
     var measurementRoute by mutableStateOf(MeasurementRouteState()); private set
     var autoResult by mutableStateOf<AutoMeasurementResult?>(null); private set
@@ -99,6 +105,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         prefs.getString("last", null)?.let { raw -> runCatching { SessionRepository.decode(raw) }.onSuccess { session = it }.onFailure { message = "保存設定を復元できません: ${it.message}" } }
+        experimentalStatus=session.experiments.current()?.let {if(!it.playable) "生成失敗: ${it.error}" else if(it.comparisons.isNotEmpty()) "比較結果あり（過去）・現在の効果は未検証" else "生成済み・未検証"} ?: "候補なし"
         draft = channel().fir
         scheduleProcessing(); previewDraft()
         if (session.source.wavUri.isNotBlank()) loadWav(Uri.parse(session.source.wavUri), false)
@@ -227,6 +234,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if(saved!=null) {if(saved.fir.length!=session.processing.length && engine.isRunning) {notify("A/BのFIR長が異なります。停止してから呼び出してください");return};if(saved.source!=session.source) stop();update {it.restore(saved)};selectSide(sideRight);return}
         val p = if (b) session.b else session.a
         if (p == null) { message = "比較設定が未保存です"; return }
+        if(p.length!=session.processing.length && engine.isRunning) {notify("A/BのFIR長が異なります。停止してから呼び出してください");return}
         update {it.copy(processing=p,correctionMode=CorrectionMode.FIR)};selectSide(sideRight)
     }
     private fun scheduleProcessing() {
@@ -349,6 +357,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         startAuto()
     }
     fun startAuto() {
+        experimentalPage=false
         if(session.adjustmentMethod==AdjustmentMethod.TONE) {startTone();return}
         if(autoBusy || loading) return
         if(needsMapping) {message="測定前に「再生・調整」の「左右の確認」を行ってください";return}
@@ -488,6 +497,125 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+    fun selectExperimentalData(raw: String) {
+        if(autoBusy) return
+        experimentalPage=true
+        try {
+            if(JSONObject(raw.removePrefix("\uFEFF")).optString("type")=="speakerarray-experimental-fir") {
+                val c=ExperimentalRepository.import(raw)
+                require(session.experiments.candidates.none {it.id==c.id}) {"同じ候補IDは読込済みです"}
+                val next=session.copy(experiments=session.experiments.copy(candidates=session.experiments.candidates+c,selected=c.id));next.validate()
+                update {next}
+                experimentalStatus=if(c.playable) "生成済み・未検証（保存候補を読込）" else "生成失敗: ${c.error}"
+            } else {
+                val input=ExperimentalFir.readDiagnostic(raw)
+                experimentalData=input;experimentalSettings=input.settings;experimentalStatus="測定データ選択済み・${input.sourceHash.take(12)}"
+            }
+        } catch(e: Exception) {experimentalData=null;experimentalSettings=null;experimentalStatus="生成禁止・測定データ不足: ${e.message}"}
+    }
+    fun editExperimentalSettings(change: (AutoFirSettings)->AutoFirSettings) {
+        if(autoBusy) return
+        experimentalSettings?.let {s->runCatching {change(s).also {it.validate()}}.onSuccess {experimentalSettings=it}.onFailure {notify(it.message ?: "設計条件不正")}}
+    }
+    fun selectExperimentalCandidate(id: String) {if(!autoBusy) {
+        update {it.copy(experiments=it.experiments.copy(selected=id))}
+        val c=session.experiments.current();experimentalStatus=if(c?.playable==true) "生成済み・未検証 / 保存比較 ${c.comparisons.size}件" else "生成失敗: ${c?.error}"
+    }}
+    fun removeExperimentalCandidate() {
+        if(autoBusy) return
+        val id=session.experiments.selected ?: return
+        update {s->val v=s.experiments;val remaining=v.candidates.filterNot {it.id==id}
+            s.copy(experiments=v.copy(candidates=remaining,selected=remaining.lastOrNull()?.id,applied=v.applied?.takeUnless {it==id}))}
+        experimentalStatus="候補一覧から削除しました。現在のFIR係数は保持しています"
+    }
+    fun generateExperimental() {
+        if(autoBusy) return
+        val input=experimentalData ?: return;val config=experimentalSettings ?: return;val method=experimentalMethod
+        if(session.experiments.candidates.size>=12) {notify("候補は最大12件です。JSONへ保存後に一覧を整理してください");return}
+        engine.stop();autoBusy=true;experimentalPage=true;experimentalStatus="候補生成中";autoTerminal=false
+        autoJob=viewModelScope.launch(start=CoroutineStart.UNDISPATCHED) {
+            try {
+                val job=coroutineContext
+                val c=withContext(Dispatchers.Default) {ExperimentalFir.generate(input,method,config) {job.ensureActive()}}
+                ensureActive()
+                // No processing, A/B or calibration mutation, including failed design attempts.
+                val next=session.copy(experiments=session.experiments.copy(candidates=session.experiments.candidates+c,selected=c.id))
+                next.validate();session=next;persist()
+                experimentalStatus=if(c.playable) "生成済み・未検証" else "生成失敗: ${c.error}"
+            } catch(e: CancellationException) {experimentalStatus="生成取消・未反映"}
+            catch(e: Exception) {experimentalStatus="生成失敗: ${e.message}"}
+            finally {autoBusy=false;autoJob=null;autoTerminal=true}
+        }
+    }
+    fun applyExperimental() {
+        if(autoBusy) return
+        val c=session.experiments.current() ?: return
+        try {
+            val p=requireNotNull(c.processing) {c.error ?: "候補なし"}
+            ExperimentalFir.validateProcessing(p,c.settings,session.masterDb)
+            val backup=SessionRepository.encode(session.copy(experiments=ExperimentalLibrary()))
+            stop();releaseHeldRoute();soloSide=null;engine.soloSide=null
+            update {it.copy(processing=p,correctionMode=CorrectionMode.FIR,
+                experiments=it.experiments.copy(applied=c.id,undo=backup))}
+            selectSide(sideRight);experimentalStatus="手動適用中・現在の効果は未検証"
+        } catch(e: Exception) {notify("手動適用を中止: ${e.message}")}
+    }
+    fun undoExperimental() {
+        if(autoBusy) return
+        val raw=session.experiments.undo ?: return
+        try {val old=SessionRepository.decode(raw);val library=session.experiments.copy(applied=null,undo=null)
+            stop();releaseHeldRoute();soloSide=null;engine.soloSide=null;update {old.copy(experiments=library)};selectSide(sideRight)
+            experimentalStatus="手動適用前の設定へ復元・停止中"
+        } catch(e: Exception) {notify("復元失敗: ${e.message}")}
+    }
+    fun exportExperimental(): String = session.experiments.current()?.let(ExperimentalRepository::export) ?: ""
+    fun compareExperimental() {
+        if(autoBusy || loading) return
+        val c=session.experiments.current() ?: return
+        if(!c.playable) {notify(c.error ?: "候補なし");return}
+        if(c.comparisons.size>=3) {notify("この候補の比較履歴は3件です。JSONへ保存してください");return}
+        if(session.experiments.candidates.sumOf {it.report.length+it.comparisons.sumOf(String::length)}>20_000_000) {notify("比較結果の保存領域が不足しています。JSONへ保存後に候補一覧を整理してください");return}
+        if(needsMapping) {notify("比較前に左右の確認を行ってください");return}
+        val original=session
+        val output: AudioDeviceInfo;val input: AudioDeviceInfo;val config: AutoFirSettings
+        try {
+            output=routes.resolve(original.autoFir.output,false);input=routes.resolve(original.autoFir.input,true)
+            RoutePolicy.requireAllowed(output.type,input.type)
+            config=original.autoFir.copy(output=output.key(),input=input.key(),lowHz=c.settings.lowHz,highHz=c.settings.highHz,taps=c.settings.taps)
+            config.validate();ExperimentalPlan.forSettings(config).validate(config.inputRate)
+            ExperimentalFir.validateProcessing(requireNotNull(c.processing),c.settings,original.masterDb)
+        } catch(e: Exception) {experimentalStatus="測定不能／中止: ${e.message}";return}
+        engine.stop();releaseHeldRoute();autoBusy=true;experimentalPage=true;autoTerminal=false
+        measurementDeviceIds=output.id to input.id;experimentalStatus="比較測定中・固定候補 ${c.id}"
+        val experimentEpoch=++autoEpoch
+        autoJob=viewModelScope.launch(start=CoroutineStart.UNDISPATCHED) {
+            var runner: ExperimentalMeasurement?=null
+            try {
+                releaseJob?.join();withTimeout(5000) {while(engine.isRunning) delay(20)}
+                prepareJob?.cancelAndJoin()
+                val m=ExperimentalMeasurement(getApplication(),output,input,config,original,c,
+                    {v->viewModelScope.launch {if(autoEpoch==experimentEpoch && autoBusy && !autoTerminal) experimentalStatus="比較測定中: $v"}},
+                    {r->viewModelScope.launch {if(autoEpoch==experimentEpoch) measurementRoute=r}})
+                runner=m
+                val result=withContext(Dispatchers.Default) {m.run()}
+                ensureActive();experimentalStatus="比較結果あり: ${result.getString("status")}"
+            } catch(e: CancellationException) {experimentalStatus=if(e is TimeoutCancellationException) "測定不能／中止: 処理時間上限（${e.message}）" else "測定不能／中止: 取消";runner?.diagnostic?.put("stage",if(e is TimeoutCancellationException) "ABORTED" else "CANCELLED")?.put("status",experimentalStatus)}
+            catch(e: Exception) {experimentalStatus="測定不能／中止: ${e.message}";runner?.diagnostic?.put("stage","ABORTED")?.put("status",experimentalStatus)}
+            finally {
+                autoTerminal=true
+                withContext(NonCancellable) {
+                    withContext(Dispatchers.IO) {runner?.audio?.close()}
+                    val result=runner?.diagnostic?.toString()
+                    val next=if(result!=null) original.copy(experiments=original.experiments.copy(candidates=original.experiments.candidates.map {
+                        if(it.id==c.id) it.copy(comparisons=it.comparisons+result) else it
+                    })) else original
+                    try {next.validate();session=next;engine.settings=next;persist()}
+                    catch(e: Exception) {session=original;notify("結果の保存上限: ${e.message}")}
+                    autoBusy=false;autoJob=null;measurementDeviceIds=null;engine.stop();scheduleProcessing()
+                }
+            }
+        }
+    }
     /** The caller has already retained this live port after accepting a measurement result. */
     internal fun holdMeasurementRoute(port: MeasurementAudio, fir: CalibrationProfile?=null, tone: ToneProfile?=null) {
         check((fir!=null) xor (tone!=null))
@@ -502,6 +630,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun showSavedFirResult() {session.calibration?.let {analysisJson=it.resultJson;tab=3}}
     fun reviewFirConditions() {adjustment(AdjustmentMethod.FIR);tab=3}
     fun calibrationStatus(): String {
+        val applied=session.experiments.candidates.find {it.id==session.experiments.applied}
+        if(session.correctionMode==CorrectionMode.FIR && applied!=null && applied.processing==session.processing)
+            return "実験用FIRを手動適用中・現在の効果は未検証（${applied.id.take(12)}）"
         if(session.correctionMode==CorrectionMode.SIMPLE) {
             val p=session.toneProfile
             val volume=routes.manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
