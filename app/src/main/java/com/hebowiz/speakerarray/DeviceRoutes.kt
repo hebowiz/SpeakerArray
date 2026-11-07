@@ -44,6 +44,7 @@ class CommunicationLease(private val context: Context, val input: AudioDeviceInf
     fun request() {
         if(!hfp) return
         require(previousMode==AudioManager.MODE_NORMAL) { "通話・他アプリの通信モード中は測定できません" }
+        AudioResourceUsage.communicationStarts.incrementAndGet()
         requested=true;manager.mode=AudioManager.MODE_IN_COMMUNICATION
         if(Build.VERSION.SDK_INT>=31) {
             val candidates=manager.availableCommunicationDevices.filter {it.type==input.type &&

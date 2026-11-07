@@ -73,8 +73,12 @@ object SyncPolicy {
     }
 }
 
-/** Bounds apply to known, normalized PCM; source and processing changes revoke the certificate. */
-object CalibrationPlaybackPolicy {
+/** Playback safety is independent of saved measurement evidence. PCM must also be checked live. */
+object PlaybackSafety {
+    fun requireSafe(p: Processing, masterDb: Double) {
+        p.validate();finiteRange(masterDb,-60.0,0.0,"共通出力 dB")
+        check(peakBound(p,masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
+    }
     fun peakBound(p: Processing, masterDb: Double): Double {
         fun bound(c: Channel,right: Boolean): Double {
             val h=if(c.enabled) FirDesigner.design(c.fir,p.length) else FirDesigner.flat(p.length)
@@ -85,6 +89,11 @@ object CalibrationPlaybackPolicy {
         }
         return max(bound(p.left,false),bound(p.right,true))*dbGain(masterDb)
     }
+}
+
+/** Describes current verification only; never a prerequisite for ordinary playback. */
+object CalibrationPlaybackPolicy {
+    fun peakBound(p: Processing, masterDb: Double) = PlaybackSafety.peakBound(p,masterDb)
     fun matches(profile: CalibrationProfile, session: Session, volume: Int, mode: Int, held: Boolean) =
         profile.matches(session,volume) && profile.mode==mode && held && peakBound(session.processing,session.masterDb)<=0.9
 }

@@ -191,7 +191,7 @@ Android APIの参照先は[AudioRecord.getTimestamp](https://developer.android.c
 
 ## BT出力制限と補正方式切替（2026-11-07）
 
-開始時のHEADは`18dcae07d87b9f96e9a55df6d22e82bba19daea6`、ブランチは`feat/android-speaker-array`です。開始時の作業ツリーはクリーンでした。今回の変更はローカル作業ツリーにあり、コミット・pushは未実施です。
+開始時のHEADは`18dcae07d87b9f96e9a55df6d22e82bba19daea6`、ブランチは`feat/android-speaker-array`です。開始時の作業ツリーはクリーンでした。当該記録作成時点では変更がローカル作業ツリーにあり、コミット・pushは未実施でした。その後、`6e92ecc`としてコミット・push済みです。
 
 ### 操作と保存
 
@@ -242,7 +242,7 @@ RFMonitorにはファイル操作、ビルド、テスト、Git状態を変更�
 
 ## 保存診断分析・単一周波数自動調整・FIR試験判定（2026-11-07）
 
-今回のユーザー指定に従い、実機へのインストール、実機操作、音響実証は実施していません。以前の節にある実機インストール・切替再生は前回の記録です。今回のAPKは未導入です。ブランチ`feat/android-speaker-array`とHEAD`18dcae07d87b9f96e9a55df6d22e82bba19daea6`を維持し、前回の未コミット変更へ追加しました。コミット・pushは未実施です。
+今回のユーザー指定に従い、実機へのインストール、実機操作、音響実証は実施していません。以前の節にある実機インストール・切替再生は前回の記録です。今回のAPKは未導入です。ブランチ`feat/android-speaker-array`とHEAD`18dcae07d87b9f96e9a55df6d22e82bba19daea6`を維持し、前回の未コミット変更へ追加しました。当該記録作成時点ではコミット・pushは未実施でした。その後、`6e92ecc`としてコミット・push済みです。
 
 ### 保存JSONの分析
 
@@ -279,3 +279,72 @@ FIRは厳密診断`strict-complex-v1`と試験判定`trial-power-v1`を分けま
 APKは`app/build/outputs/apk/debug/app-debug.apk`です。実機の単一周波数低減、広帯域FIR低減、BT出力検証はすべて今回未実施で、新しい実測の周波数・ゲイン・位相・低減量・ばらつき・成功回数はありません。ソフトウェア試験を音響低減の証明として扱いません。
 
 RFMonitorは読み取りだけで照合しました。開始・終了でHEAD、Git状態、257ファイルのSHA-256が一致し、変更・生成・ビルド・テストは行っていません。照合結果、ビルドログ、エミュレーターログはSpeakerArrayの無視対象`build/next-audit/`に保存しています。既存の監査JSONや端末固有情報は新たにGitへ追加していません。
+
+
+## 保存FIRの再利用と検証状態の分離（2026-11-07）
+
+作業開始時のブランチは`feat/android-speaker-array`、HEADは`6e92ecc223b0432653f945f26f88d14c93f9ac88`で、作業ツリーはクリーンでした。当該記録作成時点では、この節の変更は同HEADへの未コミット差分で、commit・pushは未実施でした。mainへのマージは行っていません。前節までの変更は`6e92ecc`として公開済みです。
+
+### 変更と利用操作
+
+修正前は、測定経路を解放すると、自動設計時と同じ係数のFIRでも再生を拒否していました。単一周波数探索の経路から以前のFIRへ切り替えた場合も、ViewModelとAudioEngineの校正条件検査で停止していました。
+
+修正後は「再生・調整」でFIRを選び、現在の共通出力先と音量を確認して再生できます。MIC・通信経路の解放後、アプリ再起動後、設定JSONの読込後にも、係数を変えずに使用できます。通常再生ではMIC権限を要求せず、録音・HFP通信を開始しません。出力先が不明な場合は拒否し、保存時の機器や別機器へ自動的に切り替えません。
+
+「現在の効果は未検証」と、その理由を表示します。「過去のFIR測定結果」で保存結果を確認し、「FIR効果を再確認（条件設定へ）」から測定条件の設定へ進めます。この操作だけでは測定を開始しません。過去の低減量を現在の実測値として扱わず、別方式の成功や係数の一致だけで検証済み表示を復活させません。保存形式4、両補正スロット、A/B、手動編集前の係数、元に戻すための保存値を保持します。
+
+再生安全性と検証条件の一致を別の処理にしました。保持中の経路では、方式を往復しても同じAudioTrackと録音・出力スレッドで処理を切り替えます。係数・ピーク上限、PCM、実ルート、フォーカス、経路喪失の検査は維持しています。
+
+### テストとビルド
+
+| 検証 | 結果 |
+|---|---|
+| JVM | 82件成功。既存80件と、保存FIR・安全性の追加2件 |
+| Python分析 | 既存2件成功 |
+| Android | 音声無効のAPI 27エミュレーターで20件成功。既存14件と追加6件。再実行した同一テストは重複計上していません |
+| APK | debug APK・テストAPKのビルド成功 |
+| Lint | エラー0件、依存関係の更新通知5件 |
+
+追加Androidテストの校正プロファイルは、自動設計・単一周波数成功を模した固定データです。エミュレーターの無音録音から合格係数を得たものではありません。
+
+保存FIRの通常再生では、MIC権限なし、保存入力が存在しないBT MICである条件でも、選択した本体出力で再生できました。録音開始・HFP通信開始の呼出しカウンターが増えず、通信モードも変化しないことを確認しました。方式往復で両スロットを保持し、FIRへ単純補正を重ねず、同じ音声スレッドを使用します。手動編集、測定時FIRの復元、A/B、元に戻す、過去の結果表示、測定条件画面への移動も通しています。
+
+再起動試験は、保存するテストと復元するテストを別プロセスで実行しました。間に`am force-stop`を入れ、PIDが変わったこと、保持経路が存在しないこと、復元内容と係数が一致することを確認してから再生しています。Activity再作成での代用ではありません。
+
+合成FIR成功状態から経路を明示解放した後も、保存係数と過去の結果を保持したまま通常再生できました。また、過去のFIRを残して単一周波数成功状態へ移行し、方式往復、FIR手動編集、測定時FIRの復元、再生開始を行いました。同じAudioTrackを保ち、以前のFIRは効果未検証と表示されます。保持ストリームを閉じると停止し、通常再生へ自動移行しません。
+
+不明な出力はViewModelで拒否し、入力端点を出力に要求する不一致はAudioEngineで拒否しました。非有限係数は元設定を保持して拒否し、ピーク上限超過とフォーカス喪失では停止します。フォーカス復帰や設定復元だけでは再開しません。既存試験で、PCM異常・クリップ・経路異常、自動調整中の方式変更禁止、失敗・取消時の未反映も確認しています。物理的なBT切断やOSによる実ルートのフォールバックは、このエミュレーターでは再現していません。
+
+初回JVM試験では、プロファイル内のバックアップJSONを文字列で比較し、整形の空白差で1件失敗しました。固定データを既存のJSON保存形式にそろえ、再実行で82件成功しています。処理値や判定を変更して通したものではありません。
+
+実行コマンドは次のとおりです。ADBは全操作で専用の`emulator-5556`を明示しました。録音権限の解除はテスト終了後にホスト側から行い、テスト中のプロセス終了を避けています。
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio1\jbr'
+.\gradlew.bat :core:test :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --console=plain
+python -m unittest discover -s tools -p 'test_*.py'
+# 起動オプション: -avd SpeakerArrayTest -port 5556 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+adb -s emulator-5556 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5556 install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s emulator-5556 shell pm revoke com.hebowiz.speakerarray android.permission.RECORD_AUDIO
+$runner='com.hebowiz.speakerarray.test/androidx.test.runner.AndroidJUnitRunner'
+$reuse='com.hebowiz.speakerarray.FirReuseAppTest'
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$reuse#jsonPlaybackWithoutMicPreservesSlotsHistoryEditRestoreABAndUndo,$reuse#unsafeOrMissingOutputStopsAndDoesNotResume" $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$reuse#seedSavedFirForProcessRestart" $runner
+adb -s emulator-5556 shell am force-stop com.hebowiz.speakerarray
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$reuse#restoreSavedFirInNewProcessWithoutMic" $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class "$reuse#releasedMeasuredRouteUsesExactSavedFirThroughOrdinaryPlayback,$reuse#toneSuccessKeepsOldFirAndStreamButCannotCertifyIt" $runner
+adb -s emulator-5556 shell pm revoke com.hebowiz.speakerarray android.permission.RECORD_AUDIO
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e class 'com.hebowiz.speakerarray.AppTest,com.hebowiz.speakerarray.CorrectionAppTest' $runner
+adb -s emulator-5556 shell am instrument -w -e silentEmulator true -e retainedPlaybackTest true -e class "com.hebowiz.speakerarray.PracticalAppTest,com.hebowiz.speakerarray.ToneAppTest,$reuse#toneSuccessKeepsOldFirAndStreamButCannotCertifyIt" $runner
+```
+
+### 成果物と監査
+
+debug APKは`app/build/outputs/apk/debug/app-debug.apk`、versionNameは`0.1.0`、versionCodeは`1`です。SHA-256は`c9b6592f5ad77e46bc0ad275cb4a158674917b3b218dfe07e0e4130454d0c820`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`にあります。
+
+ビルド対象は、開始時HEADに今回のアプリ・core・テストの差分を加えたソースです。最後のソース変更後に上記Gradleコマンドを実行しました。その後の変更は文書だけです。対象ソースとGradle設定50ファイルのSHA-256一覧を、無視対象`build/fir-reuse-audit/source-sha256.txt`に保存しました。一覧ファイルのSHA-256は`2cefde69d7ee268250c775a9b15df34ac7c68167ac83dd83f0f3073dcb0c2cfb`です。これは、対象パスを昇順に並べ、各行を`SHA-256  相対パス`、UTF-8・LFで保存した一覧です。対象は`app/src/`、`core/src/`、`gradle/`、`*.gradle.kts`、`gradle.properties`、`gradlew`、`gradlew.bat`で、文書は含めません。
+
+RFMonitorは読み取りだけで照合し、開始・終了のHEAD、Git状態、257ファイルすべてのSHA-256が一致しました。RFMonitorの編集・生成・ビルド・テスト・Git変更は行っていません。照合データと試験ログはSpeakerArrayの無視対象`build/fir-reuse-audit/`に保存しています。生MIC録音や端末固有情報を新たにGitへ追加していません。
+
+今回は実機へのインストール・端末操作・音出し・MIC録音・音響検証を行っていません。実機の単一周波数低減、広帯域FIR低減、BT出力の実証は未実施です。過去の準備後500〜1,000 Hzの3セッションは、試験用有効率78.82%、60.00%、74.12%で、全回に`PILOT_AMBIGUOUS`が残る不合格のままです。今回の修正では自動設計・自動探索の成功条件を変更していません。

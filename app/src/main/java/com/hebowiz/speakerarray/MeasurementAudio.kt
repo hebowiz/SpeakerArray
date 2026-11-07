@@ -132,6 +132,7 @@ class MeasurementAudio(private val context: Context, val output: AudioDeviceInfo
         val estimatedBytes=captureSeconds.toLong()*(settings.inputRate*12L+SAMPLE_RATE*8L)+48L*1024*1024
         check(estimatedBytes < Runtime.getRuntime().maxMemory()*0.65) { "測定メモリ上限を超えます。測定時間・残響・探索余裕を短くしてください" }
         capture=FloatArray(settings.inputRate*captureSeconds)
+        AudioResourceUsage.recordingStarts.incrementAndGet()
         r.startRecording();check(r.recordingState==AudioRecord.RECORDSTATE_RECORDING)
         reader=Thread({readLoop(r)},"AutoFIR-capture").also {it.start()}
         t.play()

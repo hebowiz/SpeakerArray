@@ -101,8 +101,9 @@ import kotlin.math.*
                 } else Text("測定中は音源・処理・ルートの変更をロックしています。")
             }
             val results: @Composable ()->Unit = {
+                if(diagnostic!=null) Text("過去の測定結果（測定時の条件での判定）",fontSize=14.sp)
                 if(diagnostic!=null && diagnostic.optString("method")!="TONE") DiagnosticSummary(diagnostic)
-                Text(vm.autoProgress.detail, fontSize=14.sp)
+                Text("直近の自動調整: ${vm.autoProgress.detail}", fontSize=14.sp)
                 Text(if(vm.measurementRoute.frames>0) "MIC ${fmt(vm.measurementRoute.inputDb)} dBFS / クリップ ${vm.measurementRoute.clips}" else "MICレベル・クリップ: 未評価")
                 Text(vm.measurementRoute.effects,fontSize=12.sp)
                 if(vm.maintainingRoute) {
@@ -112,7 +113,7 @@ import kotlin.math.*
                 Text(vm.calibrationStatus(),fontSize=13.sp)
                 FlowRow {
                     OutlinedButton(onClick=vm::undoAuto,enabled=!busy && (vm.session.calibration!=null || vm.session.toneProfile!=null)) {Text("元に戻す")}
-                    OutlinedButton(onClick={export(vm.exportAutoResult())},enabled=!busy && (vm.session.calibration!=null || vm.autoDiagnostic.isNotEmpty())) {Text("結果保存")}
+                    OutlinedButton(onClick={export(vm.exportAutoResult())},enabled=!busy && vm.analysisJson.isNotEmpty()) {Text("結果保存")}
                 }
                 if(diagnostic!=null) {if(diagnostic.optString("method")=="TONE") ToneDiagnosticPanel(diagnostic) else DiagnosticPanel(vm,diagnostic)}
                 Text("1測定点でのMIC録音上の相対低減量です。未校正の音圧dB SPLではありません。MICを固定して左右を確認してください。HFP内部のAGC・NS等は解除できるとは限りません。",fontSize=12.sp)

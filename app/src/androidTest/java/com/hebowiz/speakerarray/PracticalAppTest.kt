@@ -38,7 +38,7 @@ class PracticalAppTest {
             port.close();withTimeout(5000) {while(engine.isRunning) delay(20)}
         } finally {engine.stop();port.close();routes.close()}
     }
-    @Test fun sameMeasuredStreamPlaybackStopsOnChangedCoefficientsAndRelease() = runBlocking<Unit> {
+    @Test fun sameMeasuredStreamAllowsEditedFirAndStopsOnRelease() = runBlocking<Unit> {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("retainedPlaybackTest")=="true")
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand("pm grant ${context.packageName} ${Manifest.permission.RECORD_AUDIO}").use {
@@ -65,7 +65,10 @@ class PracticalAppTest {
             engine.submit(PreparedProcessing.create(p,3,true))
             delay(300);assertTrue(engine.isRunning);io.check()
             engine.settings=engine.settings.copy(processing=p.copy(delayUs=100.0))
-            withTimeout(5000) {while(engine.isRunning) delay(20)}
+            engine.submit(PreparedProcessing.create(engine.settings.processing,4,true))
+            delay(300);assertTrue(engine.isRunning)
+            assertFalse(CalibrationPlaybackPolicy.matches(profile,engine.settings,io.volumeIndex,io.mode,true))
+            engine.stop();withTimeout(5000) {while(engine.isRunning) delay(20)}
             engine.settings=original.copy(calibration=profile)
             engine.startRetained(PreparedProcessing.create(p,1,true),null,io)
             delay(300);engine.stop()

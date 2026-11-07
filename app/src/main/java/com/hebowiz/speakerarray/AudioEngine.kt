@@ -35,13 +35,13 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     @Volatile var soloSide: Boolean? = null
     fun submit(p: PreparedProcessing) {
         if(stopRequested && isRunning) return
-        check(CalibrationPlaybackPolicy.peakBound(p.parameters,settings.masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
+        PlaybackSafety.requireSafe(p.parameters,settings.masterDb)
         dsp?.submit(p)
     }
     fun seek(fraction: Double) { wav?.seek(fraction) }
     fun start(prepared: PreparedProcessing, wavFile: File?) {
         if (isRunning) return
-        check(CalibrationPlaybackPolicy.peakBound(prepared.parameters,settings.masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
+        PlaybackSafety.requireSafe(prepared.parameters,settings.masterDb)
         if (manager.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             report(AudioStatus(message="音声フォーカスを取得できません")); return
         }
@@ -56,13 +56,9 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
     fun startRetained(prepared: PreparedProcessing, wavFile: File?, port: MeasurementAudio) {
         if(isRunning) return
         port.check()
-        val initial=settings;val profile=initial.calibration
-        check(initial.autoFir==port.settings) {"測定の共通条件が一致しません"}
-        if(initial.correctionMode==CorrectionMode.FIR && profile!=null) {
-            check(CalibrationPlaybackPolicy.matches(profile,initial,port.volumeIndex,port.mode,true)) {"校正条件が一致しません"}
-            check(prepared.parameters==profile.applied.withSolo(soloSide)) {"検証済み係数と再生係数が異なります"}
-        }
-        check(CalibrationPlaybackPolicy.peakBound(prepared.parameters,initial.masterDb)<=0.9) {"出力ピーク上限を超えます。共通出力を下げてください"}
+        val initial=settings
+        check(initial.autoFir.output==port.settings.output && initial.autoFir.input==port.settings.input) {"保持中の入出力先と選択した端点が一致しません"}
+        PlaybackSafety.requireSafe(prepared.parameters,initial.masterDb)
         check(manager.requestAudioFocus(focus)==AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {"音声フォーカスを取得できません"}
         val fileSource=if(initial.source.kind==SourceKind.WAV) WavSource(requireNotNull(wavFile),initial.source.loop,initial.source.loopFade) else null
         val source=SourceEngine(initial.source,fileSource)
@@ -77,7 +73,9 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
         }
         try {
             port.beginPlayback({out ->
-                check((settings.correctionMode!=CorrectionMode.FIR || profile==null || CalibrationPlaybackPolicy.matches(profile,settings,port.volumeIndex,port.mode,true)) && settings.masterDb==initial.masterDb && settings.swapped==initial.swapped && settings.autoFir==initial.autoFir) {"校正処理が変更されました"}
+                check(settings.masterDb==initial.masterDb && settings.swapped==initial.swapped &&
+                    settings.autoFir.output==initial.autoFir.output && settings.autoFir.input==initial.autoFir.input &&
+                    settings.source.kind==initial.source.kind) {"保持中の音声経路の共通条件が変更されました"}
                 port.check()
                 if(stopRequested && gain<=0) {finish(reason);false} else {
                     source.render(l,r,settings.source.frequency,0.0,quadrature=prepared.sineQuadrature)
@@ -94,7 +92,7 @@ class AudioEngine(context: Context, private val report: (AudioStatus) -> Unit, p
                         lastReport=System.nanoTime()
                         val status=AudioStatus(playing=true,switching=engine.switching,generation=engine.appliedGeneration,
                             leftDb=levelDb(l.maxOf {abs(it)}),rightDb=levelDb(r.maxOf {abs(it)}),
-                            route=port.state().actual,message=if(settings.correctionMode==CorrectionMode.SIMPLE) "位相・振幅（効果未検証）・測定経路維持中" else "検証と同一ストリームで再生（任意音源の効果は未評価）")
+                            route=port.state().actual,message="保持中の音声ストリームで再生・効果の検証状態は補正設定欄を参照")
                         main.post {report(status)}
                     }
                     true

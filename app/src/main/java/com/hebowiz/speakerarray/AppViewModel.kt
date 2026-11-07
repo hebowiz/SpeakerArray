@@ -95,7 +95,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val diagnostic=JSONObject(autoDiagnostic)
                 val stage=AutoStage.valueOf(diagnostic.getString("stage"))
                 autoProgress=AutoProgress(if(stage==AutoStage.APPLIED) AutoStage.IDLE else stage,
-                    detail=if(stage==AutoStage.APPLIED) "保存結果あり・測定経路は解除済み。再測定が必要です" else diagnostic.getString("detail"))
+                    detail=if(stage==AutoStage.APPLIED) "保存結果あり・測定経路は解除済み。保存FIRは再生可能ですが、現在の効果は未検証です" else diagnostic.getString("detail"))
             }
         }
         prefs.getString("last", null)?.let { raw -> runCatching { SessionRepository.decode(raw) }.onSuccess { session = it }.onFailure { message = "保存設定を復元できません: ${it.message}" } }
@@ -113,7 +113,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val old = session
             if(old.swapped!=next.swapped || old.autoFir.output!=next.autoFir.output || old.autoFir.input!=next.autoFir.input) needsMapping=true
             if(engine.isRunning && (old.masterDb!=next.masterDb && maintainingRoute || old.swapped!=next.swapped || old.autoFir.output!=next.autoFir.output)) engine.stop("共通条件変更・停止")
-            if(maintainingRoute && (old.autoFir!=next.autoFir || old.swapped!=next.swapped || old.masterDb!=next.masterDb || old.activeLayout!=next.activeLayout || old.calibration!=next.calibration || (old.toneProfile!=null && (old.source!=next.source || old.simple!=next.simple || old.reverseLandscape!=next.reverseLandscape || old.toneProfile!=next.toneProfile)) || (next.correctionMode==CorrectionMode.FIR && next.calibration!=null && next.processing!=next.calibration!!.applied))) releaseHeldRoute()
+            if(maintainingRoute && (old.autoFir!=next.autoFir || old.swapped!=next.swapped || old.masterDb!=next.masterDb || old.activeLayout!=next.activeLayout || old.calibration!=next.calibration || (old.toneProfile!=null && (old.source!=next.source || old.simple!=next.simple || old.reverseLandscape!=next.reverseLandscape || old.toneProfile!=next.toneProfile)))) releaseHeldRoute()
             if(engine.isRunning && old.masterDb!=next.masterDb && CalibrationPlaybackPolicy.peakBound(next.effectiveProcessing(),next.masterDb)>0.9) {
                 engine.stop("出力ピーク上限・停止");message="出力ピーク上限を超えます。共通出力を下げてください"
             }
@@ -128,9 +128,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun correction(mode: CorrectionMode) {
         if(autoBusy || mode==session.correctionMode) return
         val next=session.copy(correctionMode=mode)
-        if(mode==CorrectionMode.FIR && next.calibration!=null && next.processing==next.calibration!!.applied && (!maintainingRoute || heldFirProfile!==next.calibration)) {
-            engine.stop("測定経路解除済み・停止")
-        }
         update {next}
     }
     fun ratioDb(db: Double) = processing {p->p.copy(right=p.right.copy(gainDb=p.left.gainDb+db))}
@@ -162,11 +159,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if(autoBusy) return
         if(releaseJob?.isActive==true) {message="通信経路の解放完了までお待ちください";return}
         try {
-            val profile=session.calibration
-            if(profile!=null && session.correctionMode==CorrectionMode.FIR && session.processing==profile.applied) {
-                check(maintainingRoute && heldFirProfile===profile) { "校正時の測定経路が解除されています。係数は保存済みですが、再測定または手動設定への変更が必要です" }
-                heldAudio?.check()
-            }
+            if(maintainingRoute) heldAudio?.check()
             engine.requestedOutput=routes.resolve(session.autoFir.output,false)
         } catch(e: Exception) {message=e.message ?: "出力先を選択してください";return}
         if (loading || prepared?.generation != generation) { message = "設定の準備が完了するまでお待ちください"; return }
@@ -338,7 +331,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun releaseHeldRoute() {
         if(maintainingRoute) engine.stop("測定経路解放・停止")
         if(maintainingRoute && autoProgress.stage==AutoStage.APPLIED)
-            autoProgress=AutoProgress(AutoStage.IDLE,detail="係数は保存済み・測定経路は解除されました。校正条件を再確認してください")
+            autoProgress=AutoProgress(AutoStage.IDLE,detail="保存FIRは通常再生できます。測定経路の解除により、現在の効果は未検証です")
         holdJob?.cancel();holdJob=null
         val held=heldAudio;heldAudio=null;heldToneProfile=null;heldFirProfile=null;maintainingRoute=false
         if(held!=null) releaseJob=viewModelScope.launch(NonCancellable+Dispatchers.IO) {held.close()}
@@ -401,14 +394,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 session=next;soloSide=null;engine.soloSide=null;appliedMode=CorrectionMode.FIR;engine.settings=next;autoBackup=backup;autoResult=result;systemVolume=result.volume
                 draft=channel().fir;firPending=false;preview();previewDraft();persist()
                 autoProgress=AutoProgress(AutoStage.APPLIED,1f,"${resolved.lowHz}–${resolved.highHz} Hz・${if(profile.hfp) "HFP録音上" else "MIC録音上"}で2信号の低減確認・停止中${if(result.verification.any {it.noiseLimited}) "（ノイズ床による測定限界あり）" else ""}")
-                run {
-                    heldAudio=runner.audio;heldFirProfile=profile;maintainingRoute=true;retained=true
-                    holdJob=viewModelScope.launch {
-                        try {while(true) {delay(250);runner.audio.check();systemVolume=runner.audio.volumeIndex}}
-                        catch(e: CancellationException) {throw e}
-                        catch(e: Exception) {engine.stop();releaseHeldRoute();autoProgress=autoProgress.copy(detail="測定条件と異なる: ${e.message}")}
-                    }
-                }
+                holdMeasurementRoute(runner.audio, fir=profile);retained=true
             } catch(e: CancellationException) {transaction.rollback();autoProgress=AutoProgress(AutoStage.CANCELLED,detail=e.message ?: "取消")}
             catch(e: Exception) {transaction.rollback();autoProgress=AutoProgress(AutoStage.REJECTED,detail=e.message ?: "測定失敗")}
             finally {
@@ -476,12 +462,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 session=next;soloSide=null;engine.soloSide=null;appliedMode=CorrectionMode.SIMPLE;engine.settings=next;autoBackup=backup
                 draft=channel().fir;firPending=false;preview();previewDraft();persist()
                 autoProgress=AutoProgress(AutoStage.APPLIED,1f,"${next.autoToneHz} Hz・指定条件でMIC録音上の低減を確認・停止中"+(if(result.edge) " / ゲイン探索範囲端" else ""))
-                heldAudio=measurement.audio;heldToneProfile=profile;maintainingRoute=true;retained=true
-                holdJob=viewModelScope.launch {
-                    try {while(true) {delay(250);measurement.audio.check();systemVolume=measurement.audio.volumeIndex}}
-                    catch(e: CancellationException) {throw e}
-                    catch(e: Exception) {engine.stop();releaseHeldRoute();autoProgress=autoProgress.copy(detail="測定条件と異なる: ${e.message}")}
-                }
+                holdMeasurementRoute(measurement.audio, tone=profile);retained=true
             } catch(e: CancellationException) {autoProgress=AutoProgress(AutoStage.CANCELLED,detail=e.message ?: "取消")}
             catch(e: Exception) {autoProgress=AutoProgress(AutoStage.REJECTED,detail=e.message ?: "測定失敗")}
             finally {
@@ -507,6 +488,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+    /** The caller has already retained this live port after accepting a measurement result. */
+    internal fun holdMeasurementRoute(port: MeasurementAudio, fir: CalibrationProfile?=null, tone: ToneProfile?=null) {
+        check((fir!=null) xor (tone!=null))
+        check(heldAudio==null)
+        heldAudio=port;heldFirProfile=fir;heldToneProfile=tone;maintainingRoute=true
+        holdJob=viewModelScope.launch {
+            try {while(true) {delay(250);port.check();systemVolume=port.volumeIndex}}
+            catch(e: CancellationException) {throw e}
+            catch(e: Exception) {engine.stop();releaseHeldRoute();autoProgress=autoProgress.copy(detail="測定条件と異なる: ${e.message}")}
+        }
+    }
+    fun showSavedFirResult() {session.calibration?.let {analysisJson=it.resultJson;tab=3}}
+    fun reviewFirConditions() {adjustment(AdjustmentMethod.FIR);tab=3}
     fun calibrationStatus(): String {
         if(session.correctionMode==CorrectionMode.SIMPLE) {
             val p=session.toneProfile
@@ -518,8 +512,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val p=session.calibration ?: return "校正結果なし"
         if(session.processing!=p.applied) return "FIR手動変更後・効果未検証（測定時の係数は保存済み）"
         val volume=routes.manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
-        return if(!CalibrationPlaybackPolicy.matches(p,session,volume,routes.manager.mode,maintainingRoute && heldFirProfile===p)) "測定条件と異なる・経路解除後は再測定が必要です" else "測定経路を維持中・任意音源の効果は未評価"
+        val reason=when {
+            !maintainingRoute -> "測定経路は解除済み"
+            heldFirProfile!==p -> "保持中の経路はこのFIRの検証経路ではありません"
+            !CalibrationPlaybackPolicy.matches(p,session,volume,routes.manager.mode,true) -> "音量・出力・測定条件が測定時と異なります"
+            else -> null
+        }
+        return if(reason!=null) "保存FIR・現在の効果は未検証（$reason）"
+            else "${p.settings.lowHz}–${p.settings.highHz} Hz・測定時の2信号で低減確認・測定経路維持中（任意音源の効果は未評価）"
     }
-    fun exportAutoResult(): String = autoDiagnostic
+    fun exportAutoResult(): String = analysisJson
     override fun onCleared() { autoJob?.cancel();heldAudio?.close();routes.close();engine.stop(); super.onCleared() }
 }

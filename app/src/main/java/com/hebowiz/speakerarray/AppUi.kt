@@ -241,6 +241,10 @@ fun fmt(v: Double, digits: Int = 1) = if(v.isFinite()) String.format(Locale.ROOT
         } else {
             Text("FIR: 左 ${firName(s.processing.left.fir.mode)} / 右 ${firName(s.processing.right.fir.mode)} / ${p.length} taps")
             Text(vm.calibrationStatus(),fontSize=12.sp)
+            if(s.calibration!=null) {
+                TextButton(onClick=vm::showSavedFirResult) {Text("過去のFIR測定結果")}
+                TextButton(onClick=vm::reviewFirConditions) {Text("FIR効果を再確認（条件設定へ）")}
+            }
             if(s.calibration!=null && s.processing!=s.calibration!!.applied) TextButton(onClick=vm::restoreMeasuredFir) {Text("測定時のFIR設定を復元")}
             TextButton(onClick={vm.tab=1}) {Text("FIR編集へ")}
         }
