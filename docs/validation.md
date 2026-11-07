@@ -534,3 +534,9 @@ JVMは100件成功、Androidは音声無効エミュレーターで9件成功し
 最終debug APKは`app/build/outputs/apk/debug/app-debug.apk`、SHA-256は`388932ee47015c1a6002ebcb58d5ac4d83f0860688bf46a2e9624e2232545f73`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`、SHA-256は`6e037c5d9df796fc55363f2e51a845f00a17754a0fd376b9fe9058935d2693eb`です。versionName `0.1.0`、versionCode `1`は従来と同じなので、ハッシュで区別してください。
 
 RFMonitorは読み取りのみで、前後のHEAD `42604b8ea820cc439988ee006a3987d72812d0ae`、クリーンなGit状態、256ファイルのSHA-256が一致しました。ログと照合記録は`build/poc-listening-audit/`へ保存しています。以前の測定結果や成果物は削除していません。大規模JSON・エクスポートの再設計は今回の対象外で、0バイト保存の問題は未修正です。
+
+### PoC試聴実装のpush・APK掲載完了（2026-11-08）
+
+実装・回帰テスト・操作手順・報告書をコミット`10e641605ea611a5944efe7a1360b4c2ca7fd9bb`として`origin/feat/android-speaker-array`へpush済みです。同じコミットを指すタグ`poc-fir-listening-20261108`で[PoC試聴Release](https://github.com/hebowiz/SpeakerArray/releases/tag/poc-fir-listening-20261108)を公開しました。
+
+debug APK、テストAPK、検証資料ZIP、チェックサム一覧の4資産がGitHub上で`uploaded`になり、サイズとSHA-256がローカルと一致することを確認しました。資料ZIPのSHA-256は`ff0eb5fbda497cc71c34535f6dddc48d010748e029fc51c90a0d7fc6f454ad5c`です。最後の経路監視修正後もAndroid回帰7件が成功しています。専用エミュレーターを終了し、実機には新APKを導入していません。
