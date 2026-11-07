@@ -48,6 +48,69 @@ class ExperimentalAppTest {
         assertTrue(vm.experimentalStatus,vm.session.experiments.current()?.playable==true)
     }
     private fun shell(command: String) {InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command).use {java.io.FileInputStream(it.fileDescriptor).readBytes()}}
+    @Test fun pocBadQualityOutputBoundCanApplyAtCurrentLevelAndUndo() {
+        init();val before=vm.session
+        val d=JSONObject(diagnostic(true)).put("reasonCode","OUTPUT_BOUND").put("masterDb",0.0)
+        val transfers=d.getJSONArray("initialTransfers")
+        for(i in 0..3) transfers.getJSONObject(i).put("snrDb",JSONArray(List(4097) {-80.0}))
+        d.getJSONObject("initialTiming").put("residual48k",20.0).put("reliable",false)
+        rule.runOnIdle {vm.selectExperimentalData(d.toString());vm.generateExperimental()}
+        rule.waitUntil(20000) {!vm.autoBusy}
+        val c=vm.session.experiments.current()!!
+        assertTrue(vm.experimentalStatus,c.playable);assertTrue(c.comparisons.isEmpty())
+        assertEquals(0.0,JSONObject(c.report).getDouble("trialCoverage"),0.0)
+        assertEquals(before.processing,vm.session.processing)
+        rule.runOnIdle {vm.update {it.copy(masterDb=0.0)};vm.applyExperimental()}
+        assertEquals(before.processing,vm.session.processing);assertTrue(vm.message,vm.message.contains("DSPピーク"))
+        rule.runOnIdle {vm.dismissMessage();vm.update {it.copy(masterDb=-30.0)};vm.applyExperimental()}
+        rule.waitUntil(10000) {!vm.preparing}
+        assertEquals(c.processing,vm.session.processing);assertEquals(c.processing,vm.engine.settings.effectiveProcessing())
+        assertEquals(0.0,vm.session.experiments.current()!!.masterDb,0.0)
+        assertFalse(vm.maintainingRoute);assertFalse(vm.audio.playing)
+        rule.runOnIdle {vm.undoExperimental()};rule.waitUntil(10000) {!vm.preparing}
+        assertEquals(before.processing,vm.session.processing);assertEquals(before.simple,vm.session.simple)
+        val saved=vm.session
+        val broken=JSONObject(d.toString()).apply {remove("initialTransfers")}
+        rule.runOnIdle {vm.selectExperimentalData(broken.toString());vm.generateExperimental()}
+        assertEquals(saved,vm.session);assertTrue(vm.experimentalStatus.contains("不足"))
+    }
+    @Test fun savedWidebandCandidatesApplyExactlyWithoutComparisonOrMic() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("widebandFixtures")=="true")
+        init();val before=vm.session
+        val recordings=AudioResourceUsage.recordingStarts.get();val communications=AudioResourceUsage.communicationStarts.get()
+        for((name,id) in listOf("poc-candidate1.json" to "cae34bb91b6a53d07048aac6","poc-candidate2.json" to "7085475b8e7b33caac6c293e")) {
+            val raw=java.io.File(rule.activity.filesDir,name).readText()
+            rule.runOnIdle {vm.selectExperimentalData(raw)}
+            val c=vm.session.experiments.current()!!;assertEquals(id,c.id)
+            if(name.contains("2")) assertTrue(c.comparisons.all {JSONObject(it).getString("outcome")=="INSUFFICIENT_REDUCTION"})
+            rule.runOnIdle {vm.applyExperimental()};rule.waitUntil(15000) {!vm.preparing}
+            assertEquals(c.processing,vm.session.processing);assertEquals(c.processing,vm.engine.settings.effectiveProcessing())
+            assertEquals(CorrectionMode.FIR,vm.session.correctionMode);assertFalse(vm.audio.playing)
+            val encoded=SessionRepository.encode(vm.session)
+            rule.runOnIdle {vm.loadSession(encoded)};rule.waitUntil(15000) {!vm.preparing}
+            assertEquals(c.coefficientHash,processingHash(vm.session.processing));assertEquals(id,vm.session.experiments.applied)
+            rule.runOnIdle {vm.start()};rule.waitUntil(10000) {vm.audio.playing && vm.audio.message=="再生"}
+            rule.runOnIdle {vm.stop()};rule.waitUntil(10000) {!vm.engine.isRunning}
+            rule.runOnIdle {vm.undoExperimental()};rule.waitUntil(10000) {!vm.preparing}
+            assertEquals(before.processing,vm.session.processing);assertEquals(before.simple,vm.session.simple)
+        }
+        assertEquals(recordings,AudioResourceUsage.recordingStarts.get());assertEquals(communications,AudioResourceUsage.communicationStarts.get())
+    }
+    @Test fun pocMeasurementCancelKeepsOldSettingsAndMainListeningControlsAreReachable() {
+        init();val before=vm.session
+        rule.runOnIdle {vm.experimentalPage=false;vm.confirmMapping(false);vm.startListening();vm.cancelAuto()}
+        rule.waitUntil(15000) {!vm.autoBusy}
+        assertEquals(before.processing,vm.session.processing);assertEquals(before.simple,vm.session.simple)
+        assertFalse(vm.maintainingRoute);assertFalse(vm.engine.isRunning)
+        generate()
+        rule.runOnIdle {vm.experimentalPage=false}
+        rule.onNodeWithText("測定してFIRを作成").assertExists()
+        rule.onNodeWithText("FIRとして反映").assertIsDisplayed().assertIsEnabled().performClick()
+        rule.waitUntil(10000) {!vm.preparing}
+        rule.onNodeWithText("反映前に戻す").assertIsDisplayed().assertIsEnabled().performClick()
+        rule.waitUntil(10000) {!vm.preparing}
+        assertEquals(before.processing,vm.session.processing)
+    }
     @Test fun generateApplyUndoImportAndPlaybackNeedNoMicAndPreserveBothSlots() {
         init();assertEquals(PackageManager.PERMISSION_DENIED,rule.activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO))
         rule.runOnIdle {vm.storeAB(false);vm.dismissMessage()};val before=vm.session

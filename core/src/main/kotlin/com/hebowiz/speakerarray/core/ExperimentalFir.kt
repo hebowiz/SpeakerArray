@@ -51,15 +51,22 @@ data class ExperimentalLibrary(val candidates: List<ExperimentalCandidate> = emp
 }
 
 data class ExperimentalInput(val settings: AutoFirSettings, val masterDb: Double, val left: List<Transfer>,
-    val right: List<Transfer>, val sourceHash: String, val notes: List<String>, val timing: String, val originalStage: String)
+    val right: List<Transfer>, val sourceHash: String, val notes: List<String>, val timing: String, val originalStage: String,
+    val originalQuality: String="{}")
 
 object ExperimentalFir {
     const val VERSION="experimental-finite-fir-v1"
+    const val LISTENING_VERSION="poc-listening-uniform-v1"
+    const val LISTENING_MAX_CHARS=32_000_000
     private val allowedSync=setOf("PILOT_AMBIGUOUS","LEGACY_SYNC_RESIDUAL")
     /** Schema 2 was written by AutoFirMeasurement: measurementOrder L,R,L,R, transfer array L1,L2,R1,R2. */
-    fun readDiagnostic(raw: String): ExperimentalInput {
-        require(raw.length<=16_000_000) {"診断JSONが大きすぎます"}
+    fun readDiagnostic(raw: String, listening: Boolean=false): ExperimentalInput {
+        require(raw.length<=if(listening) LISTENING_MAX_CHARS else 16_000_000) {"診断JSONが大きすぎます"}
         val d=JSONObject(raw.removePrefix("\uFEFF"))
+        return readDiagnostic(d,sha256(raw.toByteArray(Charsets.UTF_8)),listening)
+    }
+    /** Direct measurement handoff has no file-size gate or external JSON round trip. */
+    fun readDiagnostic(d: JSONObject, sourceHash: String, listening: Boolean): ExperimentalInput {
         require(d.getString("type")=="speakerarray-diagnostic" && d.getInt("schemaVersion")==2 && d.optString("method")!="TONE") {"対応するFIR診断スキーマ2が必要です"}
         require(d.getDouble("frequencyStepHz")==SAMPLE_RATE.toDouble()/TransferEstimator.SIZE) {"周波数刻み不明・不一致"}
         if(d.has("sampleRateHz")) require(d.getInt("sampleRateHz")==SAMPLE_RATE) {"応答レート不一致"}
@@ -73,12 +80,17 @@ object ExperimentalFir {
             require(a>end && b>a && c>=b+o.getInt("signalFrames") && o.getInt("signalFrames")>0) {"測定フレーム順序が不正です"};end=c}
         if(d.has("transferOrder")) require(d.getJSONArray("transferOrder").toString()==JSONArray(listOf("L1","L2","R1","R2")).toString()) {"応答配列の順序が不明です"}
         val timing=d.getJSONObject("initialTiming")
-        require(timing.getString("method")==SyncPolicy.VERSION && timing.getBoolean("analyzable")) {"共通時刻モデルを使用できません"}
+        require(timing.getString("method")==SyncPolicy.VERSION) {"共通時刻モデルの形式が不明です"}
         for(key in listOf("offset48k","ratio","clockPpm","residual48k","rmsResidual48k")) require(timing.getDouble(key).isFinite()) {"時刻モデルの欠損・非有限値"}
+        require(timing.getDouble("ratio")>0 && timing.getDouble("residual48k")>=0 && timing.getDouble("rmsResidual48k")>=0) {"時刻モデルを計算できません"}
+        if(!listening) {
+        require(timing.getBoolean("analyzable")) {"共通時刻モデルを使用できません"}
         require(abs(timing.getDouble("clockPpm"))<=MeasurementLimits.MAX_CLOCK_PPM && abs((timing.getDouble("ratio")-1)*1e6-timing.getDouble("clockPpm"))<0.01) {"異常なクロック比"}
         require(timing.getDouble("residual48k") in 0.0..SAMPLE_RATE/(4*s.highHz)) {"TIME_MODEL_UNRESOLVED: 共通時刻モデルの残差が大きすぎます"}
+        }
         val findings=timing.getJSONArray("findings")
         val codes=(0 until findings.length()).map {findings.getJSONObject(it).getString("code")}
+        if(!listening) {
         require(codes.all {it in allowedSync}) {"生成禁止の同期条件: ${codes.filter {it !in allowedSync}}"}
         require(timing.getBoolean("reliable") || "PILOT_AMBIGUOUS" in codes) {"同期信頼度不足の原因が不明です"}
         require(timing.getJSONArray("excluded").length()==0 && timing.getJSONArray("pilots").length()>=8) {"パイロット欠損・選別あり"}
@@ -86,12 +98,20 @@ object ExperimentalFir {
         for(i in 0 until pilots.length()) require(pilots.getJSONObject(i).getDouble("correlation")>=0.12) {"パイロット識別不能"}
         // Later failures such as verification PCM loss also invalidate this diagnostic as a generation source.
         require(d.optString("reasonCode") in listOf("BAND_QUALITY","SYNC_CONFIDENCE","VERIFIED","","INSUFFICIENT_REDUCTION","POWER_COMPARISON","REFERENCE_CHANGED")) {"中止診断: ${d.optString("reasonCode")}"}
+        }
         val a=d.getJSONArray("initialTransfers");require(a.length()==4) {"左右各2回の複素応答が必要です"}
         val t=(0..3).map {i->val v=a.getJSONObject(i)
             Transfer(v.getJSONArray("real").doublesArray(4097),v.getJSONArray("imaginary").doublesArray(4097),v.getJSONArray("snrDb").doublesArray(4097),v.getJSONArray("recordedPower").doublesArray(4097))}
-        require(t.all {v->v.recordedPower.all {it>=0} && requestBins(s).any {v.magnitude(it)>1e-8 && v.snrDb[it]>=20}}) {"無信号・識別可能な応答なし"}
+        require(t.all {v->v.recordedPower.all {it>=0}}) {"負の録音電力・不正データ"}
+        if(!listening) require(t.all {v->requestBins(s).any {v.magnitude(it)>1e-8 && v.snrDb[it]>=20}}) {"無信号・識別可能な応答なし"}
         val notes=codes+listOf("暫定応答・共通時刻モデルを使用。左右個別整列なし", "スキーマ2の応答順 L1,L2,R1,R2・測定順 L1,R1,L2,R2", "両反復から推定した共通時刻モデルを共有。交差予測は完全独立ではありません")
-        return ExperimentalInput(s,master,t.take(2),t.drop(2),sha256(raw.toByteArray(Charsets.UTF_8)),notes,timing.toString(),d.optString("stage"))
+        fun qualityRecord(key: String): Any = d.optJSONObject(key)?.let {q->
+            // Raw transfers remain in the diagnostic; do not duplicate them in every candidate report.
+            JSONObject().also {copy->q.keys().forEach {k->if(k !in listOf("left","right")) copy.put(k,q.get(k))}}
+        } ?: JSONObject.NULL
+        val quality=JSONObject().put("quality",qualityRecord("quality"))
+            .put("strictQuality",qualityRecord("strictQuality")).put("reasonCode",d.optString("reasonCode"))
+        return ExperimentalInput(s,master,t.take(2),t.drop(2),sourceHash,notes,timing.toString(),d.optString("stage"),quality.toString())
     }
     fun requestBins(s: AutoFirSettings)=(0..4096).filter {it*SAMPLE_RATE.toDouble()/8192 in s.lowHz..s.highHz}
     fun runs(bins: List<Int>): List<List<Int>> {
@@ -100,19 +120,27 @@ object ExperimentalFir {
         return runs
     }
     fun generate(input: ExperimentalInput, method: String="aggregate", settings: AutoFirSettings=input.settings,
-                 nonce: String=UUID.randomUUID().toString(), check: ()->Unit={}): ExperimentalCandidate {
+                 nonce: String=UUID.randomUUID().toString(), listening: Boolean=false, check: ()->Unit={}): ExperimentalCandidate {
         require(method in listOf("aggregate","repeat1-to-2","repeat2-to-1"));settings.validate()
         require(settings.inputRate==input.settings.inputRate && settings.referenceRight==input.settings.referenceRight &&
             settings.output==input.settings.output && settings.input==input.settings.input) {"設計時の端点・基準ch・入力レートは元診断を維持してください"}
         val assessment=TransferEstimator.assess(input.left,input.right,settings,QualityPolicy.TRIAL)
         val train=if(method=="repeat2-to-1") 1 else 0
-        val pair=if(method=="aggregate") assessment.pair else {
+        val qualityPair=if(method=="aggregate") assessment.pair else {
             // Duplicating the TRAINING observation only obtains the existing SNR taper; no evaluation response enters weights.
             TransferEstimator.assess(List(2) {input.left[train]},List(2) {input.right[train]},settings,QualityPolicy.TRIAL).pair
         }
-        val bins=pair.weights.indices.filter {pair.weights[it]>0};val requested=requestBins(settings)
+        // PoC weights are independent of SNR, repeat phase/gain and the original quality mask.
+        val requested=requestBins(settings)
+        val pair=if(listening) qualityPair.copy(weights=DoubleArray(4097).also {w->requested.forEach {w[it]=1.0}}) else qualityPair
+        val bins=pair.weights.indices.filter {pair.weights[it]>0}
         val notes=input.notes+assessment.findings.map {it.message}+if(method!="aggregate") listOf("単独反復の設計では反復性を評価していません。評価側のSNR・低減量で設計ビンを選別していません") else emptyList()
         val report=JSONObject().put("policy",VERSION).put("originalStage",input.originalStage).put("formalAccepted",false)
+            .put("designWeightPolicy",if(listening) LISTENING_VERSION else VERSION)
+            .put("qualityUsedAsGate",!listening).put("qualityMask",JSONArray(assessment.quality.valid.toList()))
+            .put("lowSnrBinCount",requested.count {min(assessment.pair.left.snrDb[it],assessment.pair.right.snrDb[it])<QualityPolicy.TRIAL.snrDb})
+            .put("originalQuality",JSONObject(input.originalQuality))
+            .put("repeatGainDb",assessment.pair.repeatDb).put("repeatPhaseDegrees",assessment.pair.repeatPhase)
             .put("measuredLowHz",input.settings.lowHz).put("measuredHighHz",input.settings.highHz)
             .put("designLowHz",settings.lowHz).put("designHighHz",settings.highHz)
             .put("timing",JSONObject(input.timing)).put("notes",JSONArray(notes)).put("trialCoverage",assessment.pair.coverage)
@@ -122,27 +150,30 @@ object ExperimentalFir {
         var p: Processing?=null;var error: String?=null
         try {
             require(settings.lowHz>=input.settings.lowHz && settings.highHz<=input.settings.highHz) {"未測定範囲へ設計帯域を拡大できません。元測定 ${input.settings.lowHz}〜${input.settings.highHz} Hz"}
-            require(JSONObject(input.timing).optDouble("residual48k",0.0)<=SAMPLE_RATE/(4*settings.highHz)) {"TIME_MODEL_UNRESOLVED: 設計上端周波数で同期残差の許容値を超えます"}
-            check();require(bins.size>=20) {"重みが正の設計ビンが20未満: ${bins.size}"}
-            val solution=AutoFirDesigner.design(pair,settings,input.masterDb,check)
-            validateProcessing(solution.processing,settings,input.masterDb)
+            if(!listening) require(JSONObject(input.timing).optDouble("residual48k",0.0)<=SAMPLE_RATE/(4*settings.highHz)) {"TIME_MODEL_UNRESOLVED: 設計上端周波数で同期残差の許容値を超えます"}
+            check();require(bins.size >= if(listening) 1 else 20) {"重みが正の設計ビンが20未満: ${bins.size}"}
+            val solution=AutoFirDesigner.design(pair,settings,input.masterDb,enforceHeadroom=!listening,check=check)
+            validateProcessing(solution.processing,settings,input.masterDb,checkHeadroom=!listening)
             p=solution.processing
             report.put("maxBoostDb",boostUpperDb(p,settings.referenceRight)).put("boostGridSize",32768).put("boostBoundMethod","dense FFT plus derivative bound between grid points").put("dspPeakBound",PlaybackSafety.peakBound(p,input.masterDb))
                 .put("commonDelayFrames",p.length/2+16).put("coefficientHash",processingHash(p))
             val evaluations=if(method=="aggregate") listOf(0,1) else listOf(1-train)
-            report.put("predictions",JSONArray(evaluations.map {r->predict(p,input.left[r],input.right[r],pair.weights,settings).put("evaluationRepeat",r+1)}))
-        } catch(e: Exception) {check();error=e.message ?: "候補生成失敗";report.put("failure",error)}
+            report.put("predictions",JSONArray(evaluations.map {r->predict(solution.processing,input.left[r],input.right[r],pair.weights,settings).put("evaluationRepeat",r+1)}))
+        } catch(e: Exception) {check();p=null;error=e.message ?: "候補生成失敗";report.put("failure",error)}
         return ExperimentalCandidate(id,input.sourceHash,method,settings,input.masterDb,p,pair.weights.toList(),report.toString(),error)
     }
-    fun validateProcessing(p: Processing,s: AutoFirSettings,master: Double) {
+    fun validateProcessing(p: Processing,s: AutoFirSettings,master: Double,checkHeadroom: Boolean=true) {
         p.validate();require(p.length==s.taps && p.delayUs==0.0 && p.phaseDeg==0.0) {"候補の遅延・位相条件が不正です"}
         val ref=if(s.referenceRight) p.right else p.left
         val flat=List(p.length) {if(it==p.length/2) 1.0 else 0.0}
         require(ref.gainDb==0.0 && !ref.muted && !ref.inverted && ref.enabled && FirDesigner.design(ref.fir,p.length).toList()==flat) {"基準chは非ゼロ・0 dB・共通遅延で固定してください"}
         val correction=if(s.referenceRight) p.left else p.right
-        require(correction.gainDb==0.0 && !correction.inverted && correction.enabled) {"候補へ別のゲイン・極性を重ねられません"}
-        require(boostUpperDb(p,s.referenceRight)<=s.maxBoostDb+1e-7) {"全周波数ブースト上限超過"}
-        PlaybackSafety.requireSafe(p,master)
+        require(correction.gainDb==0.0 && !correction.inverted && !correction.muted && correction.enabled) {"候補へ別のゲイン・極性・ミュートを重ねられません"}
+        val h=FirDesigner.design(correction.fir,p.length)
+        require(h.any {it!=0.0} && h.toList()!=flat) {"補正係数がゼロまたは恒等フィルタです。計算可能な左右応答を確認してください"}
+        val boost=boostUpperDb(p,s.referenceRight)
+        require(boost<=s.maxBoostDb+1e-7) {"全周波数ブースト $boost dB が上限 ${s.maxBoostDb} dBを超えます。正則化または設計条件を見直してください"}
+        if(checkHeadroom) PlaybackSafety.requireSafe(p,master)
     }
     fun boostUpperDb(p: Processing, referenceRight: Boolean): Double {
         val correction=if(referenceRight) p.left else p.right
@@ -189,7 +220,7 @@ object ExperimentalRepository {
         val c=ExperimentalCandidate(o.getString("id"),o.getString("sourceHash"),o.getString("method"),CalibrationRepository.readSettings(o.getJSONObject("settings")),
             o.getDouble("masterDb"),o.optJSONObject("processing")?.let {SessionRepository.readProcessing(it)},o.getJSONArray("weights").doublesArray(4097).toList(),
             o.getJSONObject("report").toString(),if(o.isNull("error")) null else o.getString("error"),o.getJSONArray("comparisons").let {a->List(a.length()) {ExperimentalRuns.migrate(a.getJSONObject(it),it)}})
-        c.validate();c.processing?.let {ExperimentalFir.validateProcessing(it,c.settings,c.masterDb)};require(c.coefficientHash==if(o.isNull("coefficientHash")) null else o.getString("coefficientHash")) {"係数ハッシュ不一致"}
+        c.validate();c.processing?.let {ExperimentalFir.validateProcessing(it,c.settings,c.masterDb,checkHeadroom=false)};require(c.coefficientHash==if(o.isNull("coefficientHash")) null else o.getString("coefficientHash")) {"係数ハッシュ不一致"}
         c.comparisons.forEach {val result=JSONObject(it)
             require(!result.getBoolean("formalAccepted") && result.getString("coefficientHash")==c.coefficientHash && result.getString("candidateId")==c.id) {"別候補または正式結果を実験結果に流用できません"}
             if(result.has("coefficientHashAfter")) require(result.getString("coefficientHashAfter")==c.coefficientHash) {"比較後の係数ハッシュ不一致"}

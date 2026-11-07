@@ -358,10 +358,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         autoSettings {it.copy(lowHz=suggestion.getDouble("lowHz"),highHz=suggestion.getDouble("highHz"))}
         startAuto()
     }
-    fun startAuto() {
+    fun startAuto() = startAutoRun(false)
+    fun startListening() = startAutoRun(true)
+    private fun startAutoRun(listening: Boolean) {
         experimentalPage=false
-        if(session.adjustmentMethod==AdjustmentMethod.TONE) {startTone();return}
+        if(!listening && session.adjustmentMethod==AdjustmentMethod.TONE) {startTone();return}
         if(autoBusy || loading) return
+        if(listening && session.experiments.candidates.size>=12) {notify("候補は最大12件です。保存後に一覧を整理してください");return}
         if(needsMapping) {message="測定前に「再生・調整」の「左右の確認」を行ってください";return}
         val backup=session
         val output: AudioDeviceInfo;val input: AudioDeviceInfo
@@ -384,7 +387,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     {r->viewModelScope.launch {if(autoEpoch==id) measurementRoute=r}},
                     {json->viewModelScope.launch {if(autoEpoch==id) analysisJson=json}})
                 val runner=measurement
-                val result=withContext(Dispatchers.Default) {runner.run()}
+                val result=withContext(Dispatchers.Default) {runner.run(listening)}
+                if(listening) {
+                    val data=requireNotNull(runner.listeningInput) {"左右の伝達特性を取得できませんでした"}
+                    // Close capture and communication before design; ordinary playback never needs this MIC.
+                    // A route-removal notification from this deliberate release must not cancel offline design.
+                    measurementDeviceIds=null
+                    withContext(Dispatchers.IO) {runner.audio.close()}
+                    autoProgress=AutoProgress(AutoStage.DESIGNING,.65f,"試聴用FIRを設計中・品質判定は注意表示のみ")
+                    val job=coroutineContext
+                    val candidate=withContext(Dispatchers.Default) {ExperimentalFir.generate(data,listening=true) {job.ensureActive()}}
+                    ensureActive();check(autoEpoch==id)
+                    addListeningCandidate(candidate)
+                    experimentalData=data;experimentalSettings=data.settings;experimentalPage=false
+                    autoProgress=AutoProgress(if(candidate.playable) AutoStage.CREATED else AutoStage.REJECTED,1f,experimentalStatus)
+                    return@launch
+                }
                 if(result==null) {
                     transaction.rollback()
                     autoProgress=AutoProgress(AutoStage.REJECTED,detail=runner.diagnostics.optString("detail","品質不足"))
@@ -510,7 +528,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 update {next}
                 experimentalStatus=if(c.playable) "生成済み・未検証（保存候補を読込）" else "生成失敗: ${c.error}"
             } else {
-                val input=ExperimentalFir.readDiagnostic(raw)
+                val input=ExperimentalFir.readDiagnostic(raw,listening=true)
                 experimentalData=input;experimentalSettings=input.settings;experimentalStatus="測定データ選択済み・${input.sourceHash.take(12)}"
             }
         } catch(e: Exception) {experimentalData=null;experimentalSettings=null;experimentalStatus="生成禁止・測定データ不足: ${e.message}"}
@@ -538,16 +556,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         autoJob=viewModelScope.launch(start=CoroutineStart.UNDISPATCHED) {
             try {
                 val job=coroutineContext
-                val c=withContext(Dispatchers.Default) {ExperimentalFir.generate(input,method,config) {job.ensureActive()}}
+                val c=withContext(Dispatchers.Default) {ExperimentalFir.generate(input,method,config,listening=true) {job.ensureActive()}}
                 ensureActive()
-                // No processing, A/B or calibration mutation, including failed design attempts.
-                val next=session.copy(experiments=session.experiments.copy(candidates=session.experiments.candidates+c,selected=c.id))
-                next.validate();session=next;persist()
-                experimentalStatus=if(c.playable) "生成済み・未検証" else "生成失敗: ${c.error}"
+                addListeningCandidate(c)
             } catch(e: CancellationException) {experimentalStatus="生成取消・未反映"}
             catch(e: Exception) {experimentalStatus="生成失敗: ${e.message}"}
             finally {autoBusy=false;autoJob=null;autoTerminal=true}
         }
+    }
+    private fun addListeningCandidate(c: ExperimentalCandidate) {
+        val next=session.copy(experiments=session.experiments.copy(candidates=session.experiments.candidates+c,selected=c.id))
+        next.validate();session=next;persist()
+        experimentalStatus=if(c.playable) "試聴用FIRを作成しました・品質注意・効果未検証" else "生成失敗: ${c.error}"
     }
     fun applyExperimental() {
         if(autoBusy) return
@@ -556,18 +576,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val p=requireNotNull(c.processing) {c.error ?: "候補なし"}
             ExperimentalFir.validateProcessing(p,c.settings,session.masterDb)
             val backup=SessionRepository.encode(session.copy(experiments=ExperimentalLibrary()))
+            val next=session.copy(processing=p,correctionMode=CorrectionMode.FIR,
+                experiments=session.experiments.copy(applied=c.id,undo=backup))
+            next.validate()
             stop();releaseHeldRoute();soloSide=null;engine.soloSide=null
-            update {it.copy(processing=p,correctionMode=CorrectionMode.FIR,
-                experiments=it.experiments.copy(applied=c.id,undo=backup))}
-            selectSide(sideRight);experimentalStatus="手動適用中・現在の効果は未検証"
-        } catch(e: Exception) {notify("手動適用を中止: ${e.message}")}
+            update {next}
+            selectSide(sideRight);experimentalStatus="FIR反映済み・効果未検証（${c.id}）"
+        } catch(e: Exception) {notify("反映できません: ${e.message}")}
     }
     fun undoExperimental() {
         if(autoBusy) return
         val raw=session.experiments.undo ?: return
         try {val old=SessionRepository.decode(raw);val library=session.experiments.copy(applied=null,undo=null)
             stop();releaseHeldRoute();soloSide=null;engine.soloSide=null;update {old.copy(experiments=library)};selectSide(sideRight)
-            experimentalStatus="手動適用前の設定へ復元・停止中"
+            experimentalStatus="反映前の設定へ復元・停止中"
         } catch(e: Exception) {notify("復元失敗: ${e.message}")}
     }
     fun exportExperimental(): String = session.experiments.current()?.let(ExperimentalRepository::export) ?: ""

@@ -46,7 +46,7 @@ import kotlin.math.*
         try {
             val raw=withContext(Dispatchers.IO) {context.contentResolver.openInputStream(uri)!!.bufferedReader().use {reader->
                 val text=StringBuilder();val buffer=CharArray(65536)
-                while(true) {val n=reader.read(buffer);if(n<0) break;require(text.length+n<=16_000_000) {"JSONは1600万文字までです"};text.append(buffer,0,n)}
+                while(true) {val n=reader.read(buffer);if(n<0) break;require(text.length+n<=ExperimentalFir.LISTENING_MAX_CHARS) {"JSONは3200万文字までです"};text.append(buffer,0,n)}
                 text.toString()}}
             vm.selectExperimentalData(raw)
         } catch(e: Exception) {vm.notify("読込失敗: ${e.message}")}
@@ -64,7 +64,7 @@ import kotlin.math.*
             OutlinedButton(onClick={vm.cancelAuto()},enabled=busy) {Text("取消")}
             if(!permitted) OutlinedButton(onClick={permissions.launch(required.toTypedArray())},enabled=!busy) {Text("比較用MIC権限を許可")}
         }
-        Text(if(vm.session.experiments.applied==c?.id && c?.processing==vm.session.processing && vm.session.correctionMode==CorrectionMode.FIR) "手動適用中・現在の効果は未検証" else vm.experimentalStatus,color=RightOrange,fontSize=13.sp)
+        Text(vm.experimentalStatus,color=RightOrange,fontSize=13.sp)
         BoxWithConstraints(Modifier.weight(1f)) {
             val controls: @Composable ()->Unit = {
                 Text("測定データを選択")
@@ -82,9 +82,9 @@ import kotlin.math.*
                     }
                 }
                 Button(onClick=vm::generateExperimental,enabled=!busy && vm.experimentalData!=null) {Text("実験用候補を作成")}
+                Text("試聴用: 帯域内の応答を等重みで設計。品質不合格ビンも含めます。",fontSize=12.sp)
                 Text("生成では現在のFIRを変更しません。条件変更後は別IDの候補になります。",fontSize=12.sp)
-                if(vm.session.experiments.candidates.isNotEmpty()) Choice("候補",c?.id ?: "",vm.session.experiments.candidates.map {
-                    "${it.id.take(8)} / ${it.method} / ${if(it.playable) "生成済み" else "失敗"}" to it.id},!busy,change=vm::selectExperimentalCandidate)
+                ListeningCandidateControls(vm)
                 c?.let {candidate->
                     Text("ID ${candidate.id}\n元測定 ${fmt(report?.optDouble("measuredLowHz") ?: Double.NaN)}–${fmt(report?.optDouble("measuredHighHz") ?: Double.NaN)} Hz（旧候補の不明値は—）\n設計 ${candidate.settings.lowHz}–${candidate.settings.highHz} Hz / ${candidate.settings.taps} taps\n比較評価 ${candidate.settings.lowHz}–${candidate.settings.highHz} Hz\n係数 ${candidate.coefficientHash ?: "生成失敗"}",fontSize=12.sp)
                     val block=vm.measurementBlockReason()
@@ -95,8 +95,6 @@ import kotlin.math.*
                     Text("3ラウンド / 要求帯域全体のMIC相対電力 / 窓0.512秒×3 / 待ち ${fmt(plan.minimumWait)}〜8秒 / 最大240秒。再設計なし。",fontSize=12.sp)
                     FlowRow {
                         OutlinedButton(onClick={export(vm.exportExperimental())},enabled=!busy) {Text("候補・結果を保存")}
-                        OutlinedButton(onClick=vm::applyExperimental,enabled=!busy && candidate.playable) {Text("手動適用")}
-                        OutlinedButton(onClick=vm::undoExperimental,enabled=!busy && vm.session.experiments.undo!=null) {Text("手動適用を元に戻す")}
                     }
                     TextButton(onClick=vm::removeExperimentalCandidate,enabled=!busy) {Text("一覧から削除（先にJSON保存）")}
                     if(candidate.comparisons.isNotEmpty()) {
@@ -157,6 +155,29 @@ import kotlin.math.*
             } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {controls();results()}
         }
     }
+}
+@Composable internal fun ListeningCandidateControls(vm: AppViewModel) {
+    val library=vm.session.experiments;val c=library.current();val busy=vm.autoBusy
+    val report=remember(c?.report) {c?.let {JSONObject(it.report)}}
+    Text("試聴用FIR",color=LeftBlue)
+    if(library.candidates.isNotEmpty()) Choice("候補",c?.id ?: "",library.candidates.map {
+        "${it.id.take(8)} / ${it.method} / ${if(it.playable) "生成済み" else "失敗"}" to it.id},!busy,change=vm::selectExperimentalCandidate)
+    FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        Button(onClick=vm::applyExperimental,enabled=!busy && c?.playable==true) {Text("FIRとして反映")}
+        OutlinedButton(onClick=vm::undoExperimental,enabled=!busy && library.undo!=null) {Text("反映前に戻す")}
+    }
+    Text(if(library.applied==c?.id && c?.processing==vm.session.processing && vm.session.correctionMode==CorrectionMode.FIR)
+        "FIR反映済み・効果未検証（${c?.id}）" else vm.experimentalStatus,fontSize=12.sp,color=RightOrange)
+    c?.let {
+        Text("選択ID ${it.id}\n測定時 ${it.masterDb} dB / 現在の試聴時 ${vm.session.masterDb} dB",fontSize=12.sp)
+        Text("品質注意: 元の有効率 ${fmt((report?.optDouble("trialCoverage") ?: Double.NaN)*100)}% / 反復差 ${fmt(report?.optDouble("repeatGainDb") ?: Double.NaN)} dB・${fmt(report?.optDouble("repeatPhaseDegrees") ?: Double.NaN)}°。比較未実施・効果不足でも反映できます。",fontSize=12.sp)
+        val uniform=report?.optString("designWeightPolicy")==ExperimentalFir.LISTENING_VERSION
+        Text("SNR不足 ${report?.optInt("lowSnrBinCount",-1)?.takeIf {n->n>=0}?.toString() ?: "詳細参照"} ビン / ${if(uniform) "帯域内を等重みで設計・品質不合格ビンも使用" else "保存時の設計重みを保持"}",fontSize=12.sp)
+        val timing=report?.optJSONObject("timing")
+        Text("同期信頼度 ${if(timing?.optBoolean("reliable")==true) "基準内" else "注意・詳細参照"} / 残差 ${fmt(timing?.optDouble("residual48k") ?: Double.NaN)} sample。品質情報は反映の合否には使いません。",fontSize=12.sp)
+        if(it.error!=null) Text("生成できません: ${it.error}",color=RightOrange,fontSize=12.sp)
+    }
+    Text("反映後は停止します。「再生・調整」で音源を選んで再生してください。MICは不要です。再生出力・配置が測定時と異なる場合の効果は未確認です。",fontSize=12.sp)
 }
 private fun runTime(d: JSONObject): String=if(d.isNull("startedAtEpochMs")) "日時不明（旧履歴）" else
     java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z",java.util.Locale.ROOT).format(java.util.Date(d.optLong("startedAtEpochMs")))

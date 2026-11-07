@@ -45,12 +45,13 @@ import kotlin.math.*
     Column(Modifier.fillMaxSize().padding(horizontal=8.dp)) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick={vm.experimentalPage=true},enabled=!busy) {Text("実験用FIR")}
+            if(!tone) Button(onClick=vm::startListening,enabled=!busy && permitted && !vm.loading && blockReason==null) {Text("測定してFIRを作成")}
             Button(onClick=vm::startAuto,enabled=!busy && permitted && !vm.loading && blockReason==null) {Text("自動調整")}
             OutlinedButton(onClick={vm.cancelAuto()},enabled=busy) {Text("取消")}
             if(!permitted) OutlinedButton(onClick={permissions.launch(required.toTypedArray())},enabled=!busy) {Text("MIC・Bluetooth権限を許可")}
-            Text("${vm.autoProgress.stage.label}  ${(vm.autoProgress.fraction*100).toInt()}%",modifier=Modifier.padding(vertical=12.dp))
+            Text(if(busy) "${vm.autoProgress.stage.label}  ${(vm.autoProgress.fraction*100).toInt()}%" else "停止中",modifier=Modifier.padding(vertical=12.dp))
         }
-        Text("選択方式: ${if(vm.session.correctionMode==CorrectionMode.FIR) "FIR" else "位相・振幅"} / 自動調整成功時のみ選択した調整方式へ反映",fontSize=12.sp)
+        Text("選択方式: ${if(vm.session.correctionMode==CorrectionMode.FIR) "FIR" else "位相・振幅"} / 試聴候補は「FIRとして反映」で手動反映。自動調整は従来の検証を実施。",fontSize=12.sp)
         if(blockReason!=null) Text(blockReason,color=RightOrange,fontSize=12.sp)
         if(busy) LinearProgressIndicator(progress={vm.autoProgress.fraction},modifier=Modifier.fillMaxWidth())
         val live=busy || vm.maintainingRoute
@@ -85,7 +86,7 @@ import kotlin.math.*
                     NumberControl("測定下限",s.lowHz,"Hz",80.0..10000.0,vm::stop,slider=false) {v->vm.autoSettings {it.copy(lowHz=v)}}
                     NumberControl("測定上限",s.highHz,"Hz",100.0..16000.0,vm::stop,slider=false) {v->vm.autoSettings {it.copy(highHz=v)}}
                     }
-                    NumberControl("測定レベル（共通出力）",vm.session.masterDb,"dB",-60.0..0.0,vm::stop,slider=false) {v->vm.update {it.copy(masterDb=v)}}
+                    NumberControl("測定・試聴の共通出力",vm.session.masterDb,"dB",-60.0..0.0,vm::stop,slider=false) {v->vm.update {it.copy(masterDb=v)}}
                     if(!tone) Choice("FIR長",s.taps,listOf(257,513,1025).map {"$it taps" to it},true) {v->vm.autoSettings {it.copy(taps=v)}}
                     TextButton(onClick={advanced=!advanced}) {Text("高度な設定")}
                     if(advanced) {
@@ -105,6 +106,7 @@ import kotlin.math.*
                 } else Text("測定中は音源・処理・ルートの変更をロックしています。")
             }
             val results: @Composable ()->Unit = {
+                ListeningCandidateControls(vm)
                 if(diagnostic!=null) Text("過去の測定結果（測定時の条件での判定）",fontSize=14.sp)
                 if(diagnostic!=null && diagnostic.optString("method")!="TONE") DiagnosticSummary(diagnostic)
                 Text("直近の自動調整: ${vm.autoProgress.detail}", fontSize=14.sp)

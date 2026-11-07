@@ -257,13 +257,13 @@ data class FirSolution(val processing: Processing, val predictedDb: Double, val 
 /** Real causal finite-dimensional least squares, solved with a Toeplitz FFT normal operator. */
 object AutoFirDesigner {
     internal val designInvocations=java.util.concurrent.atomic.AtomicLong()
-    fun design(pair: MeasuredPair, settings: AutoFirSettings, masterDb: Double, check: () -> Unit = {}): FirSolution {
+    fun design(pair: MeasuredPair, settings: AutoFirSettings, masterDb: Double, enforceHeadroom: Boolean=true, check: () -> Unit = {}): FirSolution {
         designInvocations.incrementAndGet()
         val n=TransferEstimator.SIZE; val taps=settings.taps; val delay=taps/2
         val ref=if(settings.referenceRight) pair.right else pair.left
         val correction=if(settings.referenceRight) pair.left else pair.right
         val scale=correction.re.indices.maxOf { correction.magnitude(it).pow(2)*pair.weights[it] }
-        require(scale>1e-16) { "補正側が無信号です" }
+        require(scale.isFinite() && scale > if(enforceHeadroom) 1e-16 else 0.0) { "補正側応答がゼロまたは計算範囲外です" }
         val normal=DoubleArray(n); val br=DoubleArray(n); val bi=DoubleArray(n)
         for(k in 0..n/2) {
             val w=pair.weights[k]; val phase=-2*PI*k*delay/n
@@ -299,7 +299,8 @@ object AutoFirDesigner {
         val boost=levelDb((0..n/2).maxOf {hypot(hr[it],hi[it])})
         require(boost <= settings.maxBoostDb) { "過大ブースト $boost dB（上限 ${settings.maxBoostDb} dB）" }
         val bound=max(1.0,h.sumOf {abs(it)})*dbGain(masterDb)
-        require(bound<=0.9) { "出力余裕不足。共通出力を手動で下げて再測定してください" }
+        require(bound.isFinite()) {"DSP出力上限を計算できません"}
+        if(enforceHeadroom) require(bound<=0.9) { "出力余裕不足。共通出力を手動で下げて再測定してください" }
         var before=0.0;var after=0.0
         for(k in pair.weights.indices) {
             val phase=-2*PI*k*delay/n

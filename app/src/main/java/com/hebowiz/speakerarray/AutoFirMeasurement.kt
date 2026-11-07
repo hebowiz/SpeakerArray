@@ -12,7 +12,7 @@ import org.json.JSONArray
 
 enum class AutoStage(val label: String) {
     IDLE("未測定"), ROUTING("経路確認"), MEASURING("測定中"), SEARCHING("探索中"), ANALYZING("同期・品質解析"), DESIGNING("設計中"),
-    TRIAL("試験適用"), VERIFYING("効果確認"), APPLIED("適用完了"), REJECTED("品質不足・未反映"), CANCELLED("取消・未反映")
+    TRIAL("試験適用"), VERIFYING("効果確認"), CREATED("試聴候補作成済み"), APPLIED("適用完了"), REJECTED("未反映"), CANCELLED("取消・未反映")
 }
 data class AutoProgress(val stage: AutoStage=AutoStage.IDLE, val fraction: Float=0f, val detail: String="")
 data class AutoMeasurementResult(val pair: MeasuredPair, val solution: FirSolution, val timing: TimingFit,
@@ -26,6 +26,8 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
     private val onProgress: (AutoProgress)->Unit, route: (MeasurementRouteState)->Unit,
     private val analysis: (String)->Unit = {}) {
     val audio=MeasurementAudio(context,output,input,config,route)
+    var listeningInput: ExperimentalInput?=null; private set
+    private var listening=false
     val diagnostics=JSONObject().put("type","speakerarray-diagnostic").put("schemaVersion",2)
         .put("thresholds",MeasurementResultStore.thresholds()).put("settings",CalibrationRepository.settings(config))
         .put("sampleRateHz",SAMPLE_RATE).put("transferOrder",JSONArray(listOf("L1","L2","R1","R2")))
@@ -98,7 +100,8 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
         if(template==null) {
             val first=detect(emitted.first(),pilot)
             diagnostics.put("initialPilot",JSONObject().put("correlation",first.correlation).put("position",first.position+captureOrigin))
-            require(first.correlation>0.12) {"パイロットを識別できません"}
+            if(!listening) require(first.correlation>0.12) {"パイロットを識別できません"}
+            require(first.position.isFinite()) {"パイロットの時刻を計算できません"}
             val raw=DoubleArray(pilot.size) {MeasurementSync.sample(pcm,first.position+it)}
             val n=powerOfTwo(raw.size);val re=raw.copyOf(n);val im=DoubleArray(n);Fft.transform(re,im)
             for(k in 0 until n) if(min(k,n-k)*SAMPLE_RATE.toDouble()/n !in config.lowHz..config.highHz) {re[k]=0.0;im[k]=0.0}
@@ -121,7 +124,8 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
             re[k]=t.re[k]*cos(p)-t.im[k]*sin(p);im[k]=t.re[k]*sin(p)+t.im[k]*cos(p)}
         return t.copy(re=re,im=im)
     }
-    suspend fun run(): AutoMeasurementResult? = withTimeout(MeasurementLimits.MAX_SECONDS*1000L) {
+    suspend fun run(forListening: Boolean=false): AutoMeasurementResult? = withTimeout(MeasurementLimits.MAX_SECONDS*1000L) {
+        listening=forListening
         config.validate();val started=System.currentTimeMillis();diagnostics.put("startedAtEpochMs",started)
         progress(AutoProgress(AutoStage.ROUTING,0f,"MIC許可・入出力を確認中"));audio.open()
         diagnostics.put("requested",audio.state().requested).put("actual",audio.state().actual).put("pcm",audio.state().pcm)
@@ -137,10 +141,16 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
             emit(if(right) "R" else "L",signal,right)
         }
         audio.silence(config.latencySeconds+0.2)
-        var pcm=snapshot();MeasurementQuality.input(pcm)
+        var pcm=snapshot()
+        if(listening) {
+            require(pcm.isNotEmpty() && pcm.all {it.isFinite()}) {"PCM欠落・非有限値"}
+            require(pcm.none {abs(it)>=0.999}) {"MIC入力クリップ"}
+            require(pcm.any {it!=0.0}) {"MIC録音がすべてゼロです"}
+        } else MeasurementQuality.input(pcm)
         progress(AutoProgress(AutoStage.ANALYZING,0.25f,"パイロット時刻モデル・周波数別の品質を解析"))
         val initialSync=timing(pcm,"initial")
-        if(!initialSync.analyzable) return@withTimeout reject("SYNC_ABORT",initialSync.findings.joinToString {it.message})
+        if(!listening && !initialSync.analyzable) return@withTimeout reject("SYNC_ABORT",initialSync.findings.joinToString {it.message})
+        require(initialSync.fit.offset.isFinite() && initialSync.fit.ratio.isFinite() && initialSync.fit.ratio>0 && initialSync.fit.residual.isFinite()) {"共通時刻モデルを計算できません"}
         val left=shots.filter {it.tag=="L"}.map {transfer(pcm,initialSync.fit,it,noise)}
         val right=shots.filter {it.tag=="R"}.map {transfer(pcm,initialSync.fit,it,noise)}
         val strict=TransferEstimator.assess(left,right,config,QualityPolicy.STRICT)
@@ -149,6 +159,12 @@ class AutoFirMeasurement(context: Context, output: AudioDeviceInfo, input: Audio
             .put("strictPolicy",MeasurementResultStore.policy(QualityPolicy.STRICT))
         diagnostics.put("quality",MeasurementResultStore.pair(quality)).put("initialTransfers",JSONArray((left+right).map {MeasurementResultStore.transfer(it)}))
         MeasurementQuality.distinctChannels(pair)?.let {warnings+=it};publish()
+        if(listening) {
+            diagnostics.put("clips",audio.state().clips).put("stage",AutoStage.ANALYZING.name)
+                .put("reasonCode",if(!quality.eligible) "BAND_QUALITY" else if(!initialSync.reliable) "SYNC_CONFIDENCE" else "POC_UNVERIFIED")
+            listeningInput=ExperimentalFir.readDiagnostic(diagnostics,sha256(diagnostics.toString().toByteArray(Charsets.UTF_8)),true)
+            return@withTimeout null
+        }
         if(!quality.eligible) return@withTimeout reject("BAND_QUALITY",quality.findings.joinToString {it.message})
         if(!initialSync.reliable) return@withTimeout reject("SYNC_CONFIDENCE",initialSync.findings.joinToString {it.message})
         val mask=pair.weights.copyOf();diagnostics.put("evaluationMask",MeasurementResultStore.array(mask)).put("trialEligible",true)

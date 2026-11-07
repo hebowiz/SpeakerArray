@@ -520,3 +520,17 @@ RFMonitorは開始・終了のHEAD、Git状態、257ファイルのSHA-256が一
 検証報告・CSV・図・取得方法とハッシュの一覧をコミット`ff50ee2e9f1546569d8dfe036a0e86931ad4a73c`として`origin/feat/android-speaker-array`へpush済みです。同じコミットを指すタグ`wideband-validation-20261107`で[検証用Release](https://github.com/hebowiz/SpeakerArray/releases/tag/wideband-validation-20261107)を公開しました。正式合格を示さないためprereleaseとしています。
 
 Releaseには資料ZIP、debug APK、テストAPK、`SHA256SUMS.txt`の4ファイルを掲載済みです。GitHub APIで全資産の`uploaded`状態とサイズ、SHA-256の一致を確認しました。ZIPは24,000,100バイト、SHA-256は`3bdc98f264162756f5a6e20f3e62c2c59243c5e36936bdcaac3a66799b6315a6`です。ZIP内の28ファイルも格納前後のSHA-256とアーカイブのCRCを照合し、別途チェックサム一覧を同梱しています。APKは測定に使用した版と同じで、上記のSHA-256から変更ありません。
+
+### 品質判定と分けてFIRを試聴するPoC（2026-11-08）
+
+`SpeakerArray_PoC_FIR_Listening_Codex_20261107.md`に従い、測定から試聴候補を直接作成し、手動反映・通常再生・復元へ進む経路を追加しました。着手時HEADは`b4ca3a55c7f263d10c6b3ce1c07af7ba944e4032`で、作業ツリーはクリーンでした。ブランチは`feat/android-speaker-array`を継続しています。[操作手順・設計条件・制約](poc-fir-listening.md)に詳細を記載しました。
+
+試聴経路は要求帯域の等重み設計を使い、SNR・反復差・同期信頼度・残差・品質合格率を生成や反映の合否に使いません。品質情報と元の合格マスクは保持します。OUTPUT_BOUNDの過去診断も有効な応答から再設計でき、測定時の音量とは別に、反映時の現在値でDSPピーク上限を確認します。有限値・配列・ブースト・出力PCMの成立条件は維持しています。
+
+JVMは100件成功、Androidは音声無効エミュレーターで9件成功しました。前回の候補1・2を使った反映と係数一致、比較未実施・3 dB未達の許容、MIC権限なしの通常再生、取消・不正データでの旧設定保持、保存・別プロセスでの復元を確認しています。初回の追加試験コードにprivateフィールド参照のコンパイルエラーがあり、通常再生側の公開設定との照合へ修正しました。候補生成失敗時の係数破棄に伴うKotlinの型推論エラーも修正し、全JVMテストとAPKビルドを再実行しました。
+
+その後、状態表示と横置き小画面のボタン配置を調整しました。960×440のUI試験を再実行し、反映・復元ボタンがスクロールせず表示され、操作できることを確認しました。さらにコード確認で、測定後の意図したHFP経路解放が設計取消を誘発しうる箇所を修正しました。取得済み応答の設計へ進む前に測定端点の監視を終了し、ユーザーによる取消は引き続き有効です。Lintはエラー0件・既存の依存更新警告5件です。全ADB操作で`emulator-5556`を指定し、エミュレーターは`-no-window -no-audio -no-snapshot`で起動しました。実機への更新インストール・新規測定・試聴は行っていません。
+
+最終debug APKは`app/build/outputs/apk/debug/app-debug.apk`、SHA-256は`388932ee47015c1a6002ebcb58d5ac4d83f0860688bf46a2e9624e2232545f73`です。テストAPKは`app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`、SHA-256は`6e037c5d9df796fc55363f2e51a845f00a17754a0fd376b9fe9058935d2693eb`です。versionName `0.1.0`、versionCode `1`は従来と同じなので、ハッシュで区別してください。
+
+RFMonitorは読み取りのみで、前後のHEAD `42604b8ea820cc439988ee006a3987d72812d0ae`、クリーンなGit状態、256ファイルのSHA-256が一致しました。ログと照合記録は`build/poc-listening-audit/`へ保存しています。以前の測定結果や成果物は削除していません。大規模JSON・エクスポートの再設計は今回の対象外で、0バイト保存の問題は未修正です。

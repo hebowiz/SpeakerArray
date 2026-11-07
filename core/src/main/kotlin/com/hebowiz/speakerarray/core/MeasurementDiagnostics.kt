@@ -77,7 +77,8 @@ object SyncPolicy {
 object PlaybackSafety {
     fun requireSafe(p: Processing, masterDb: Double) {
         p.validate();finiteRange(masterDb,-60.0,0.0,"共通出力 dB")
-        check(peakBound(p,masterDb)<=0.9) {"出力ピーク上限を超える設定です。共通出力を下げてください"}
+        val bound=peakBound(p,masterDb)
+        check(bound.isFinite() && bound<=0.9) {"現在の共通出力 $masterDb dBではDSPピーク $bound が上限0.9を超えます。共通出力を下げて再度反映・再生してください"}
     }
     fun peakBound(p: Processing, masterDb: Double): Double {
         fun bound(c: Channel,right: Boolean): Double {

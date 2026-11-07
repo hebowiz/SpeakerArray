@@ -193,6 +193,69 @@ class ExperimentalFirTest {
         assertTrue(ExperimentalSettling.ready(List(3) {signal},4.0,2.0,1e-12,true))
         assertFalse(ExperimentalSettling.ready(listOf(signal,signal,signal.copy(power=1e-6)),4.0,2.0,1e-12,true))
     }
+    @Test fun listeningUsesBadQualityResponsesWithoutSNRPhaseOrSyncGate() {
+        val d=diagnostic();val transfers=d.getJSONArray("initialTransfers")
+        for(i in 0..3) transfers.getJSONObject(i).put("snrDb",JSONArray(List(4097) {-100.0}))
+        // A different phase in repeat 2 remains untouched, rather than aligned to repeat 1.
+        val second=transfers.getJSONObject(1)
+        val re=second.getJSONArray("real");val im=second.getJSONArray("imaginary")
+        second.put("real",JSONArray(List(4097) {-im.getDouble(it)})).put("imaginary",re)
+        d.getJSONObject("initialTiming").put("residual48k",20.0).put("analyzable",false)
+            .put("findings",JSONArray().put(JSONObject().put("code","TIME_MODEL_UNRESOLVED")))
+        val source=d.toString();val data=ExperimentalFir.readDiagnostic(source,listening=true)
+        val c=ExperimentalFir.generate(data,listening=true)
+        assertTrue(c.error,c.playable);c.validate()
+        val report=JSONObject(c.report)
+        assertEquals(0.0,report.getDouble("trialCoverage"),0.0)
+        assertEquals(ExperimentalFir.LISTENING_VERSION,report.getString("designWeightPolicy"))
+        assertFalse(report.getBoolean("formalAccepted"));assertFalse(report.getBoolean("qualityUsedAsGate"))
+        assertEquals(ExperimentalFir.requestBins(settings).size,c.weights.count {it==1.0})
+        assertTrue((0 until 4097).all {!report.getJSONArray("qualityMask").getBoolean(it)})
+        assertEquals(source,d.toString())
+        assertTrue(runCatching {ExperimentalFir.readDiagnostic(source)}.isFailure)
+        assertEquals(c.processing,ExperimentalRepository.import(ExperimentalRepository.export(c)).processing)
+    }
+    @Test fun listeningDesignsWithFewerThanTwentyNonzeroResponseBins() {
+        val src=input()
+        fun sparse(t: Transfer)=t.copy(re=DoubleArray(4097) {if(it in 95..104) t.re[it] else 0.0},
+            im=DoubleArray(4097) {if(it in 95..104) t.im[it] else 0.0},snrDb=DoubleArray(4097) {-100.0})
+        val c=ExperimentalFir.generate(src.copy(left=src.left.map(::sparse),right=src.right.map(::sparse)),listening=true)
+        assertTrue(c.error,c.playable)
+        assertTrue(c.processing!!.right.fir.coefficients.any {it!=0.0})
+        assertEquals(0.0,JSONObject(c.report).getDouble("trialCoverage"),0.0)
+    }
+    @Test fun outputBoundDiagnosticCanBeRedesignedAndLoadedThenCheckedAtListeningLevel() {
+        val d=diagnostic().put("reasonCode","OUTPUT_BOUND").put("masterDb",0.0)
+        val input=ExperimentalFir.readDiagnostic(d.toString(),listening=true)
+        val c=ExperimentalFir.generate(input,listening=true)
+        assertTrue(c.error,c.playable)
+        val loaded=ExperimentalRepository.import(ExperimentalRepository.export(c))
+        assertEquals(0.0,loaded.masterDb,0.0)
+        assertThrows(IllegalStateException::class.java) {ExperimentalFir.validateProcessing(loaded.processing!!,loaded.settings,0.0)}
+        ExperimentalFir.validateProcessing(loaded.processing!!,loaded.settings,-30.0)
+        assertEquals(0.0,d.getDouble("masterDb"),0.0)
+        val excessive=input.copy(left=input.left.map {t->t.copy(re=t.re.map {it*10}.toDoubleArray(),im=t.im.map {it*10}.toDoubleArray())})
+        assertFalse(ExperimentalFir.generate(excessive,listening=true).playable)
+    }
+    @Test fun listeningStillRejectsMissingArraysInvalidTimeAndInvalidCoefficients() {
+        for(edit in listOf<(JSONObject)->Unit>({it.remove("initialTransfers")},
+            {it.getJSONArray("initialTransfers").getJSONObject(0).getJSONArray("real").put(90,JSONObject.NULL)},
+            {it.getJSONObject("initialTiming").put("ratio",0.0)},
+            {it.getJSONArray("measurementOrder").getJSONObject(0).put("tag","R")})) {
+            val d=diagnostic();edit(d)
+            assertTrue(runCatching {ExperimentalFir.readDiagnostic(d.toString(),listening=true)}.isFailure)
+        }
+        val src=input();val zero=Transfer(DoubleArray(4097),DoubleArray(4097),DoubleArray(4097))
+        assertFalse(ExperimentalFir.generate(src.copy(right=listOf(zero,zero)),listening=true).playable)
+        assertFalse(ExperimentalFir.generate(src.copy(left=listOf(zero,zero)),listening=true).playable)
+        val c=candidate();val p=c.processing!!
+        for(h in listOf(List(p.length) {0.0},List(p.length) {if(it==p.length/2) 1.0 else 0.0},List(p.length) {Double.NaN})) {
+            val bad=p.copy(right=p.right.copy(fir=p.right.fir.copy(coefficients=h)))
+            assertTrue(runCatching {ExperimentalFir.validateProcessing(bad,c.settings,-30.0)}.isFailure)
+        }
+        var checks=0
+        assertThrows(IllegalStateException::class.java) {ExperimentalFir.generate(src,listening=true) {if(++checks>=2) error("cancel")}}
+    }
     @Test fun fullLegacyHistoryCanArchiveAndPruneOnlySavedSelectionWithoutChangingCandidate() {
         val base=candidate()
         val old=base.copy(comparisons=listOf("ABORTED","CANCELLED","COMPLETED").map {stage->
