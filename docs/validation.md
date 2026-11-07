@@ -566,3 +566,9 @@ WAV以外の音源も使いたいという依頼に対応しました。Android�
 debug APKのSHA-256は`384596f8fa9c7ddd3422666ba0a3520ed2dc0bf3d5182e3ee3562661a32e1da6`、androidTest APKは`94a341ac559efa6090235854950ee5636db8d00788b67c2659ea75e4ac421da2`です。versionName `0.1.0`、versionCode `1`は従来どおりです。今回の実機へのインストール・操作・音出しは行っていません。RFMonitorにもアクセスしていません。
 
 実装・テスト音源・検証記録・操作説明はコミット`71d27127962f331bab7829db7be5da41199d809c`として`origin/feat/android-speaker-array`へpush済みです。[音声ファイル対応Release](https://github.com/hebowiz/SpeakerArray/releases/tag/audio-files-20261108)に両APK・検証資料ZIP・チェックサム一覧を掲載し、4資産の`uploaded`状態、サイズ、SHA-256一致を確認しました。資料ZIPは8,191バイト、SHA-256は`e86081b01b2e212636975945b97e07d4ff9eaa109209acc068550046f7d5be56`です。専用エミュレーターは終了しています。
+
+### 音声ファイル対応版のWi-Fi更新インストール（2026-11-08）
+
+ユーザーが指定したWi-Fi ADB接続先のXQ-FS44へ、音声ファイル対応版を`install -r`で更新インストールしました。既存データを保持する更新で、ADBは`Success`で終了しています。端末側のversionName `0.1.0`、versionCode `1`、更新日時`2026-11-08 08:55:30`を確認しました。
+
+端末から導入済みの`base.apk`を取得し、SHA-256が`384596f8fa9c7ddd3422666ba0a3520ed2dc0bf3d5182e3ee3562661a32e1da6`で、上記の検証済みAPKおよびRelease掲載版と一致することを確認しました。今回は更新インストールと導入確認のみで、アプリ起動・設定操作・音出し・測定は行っていません。
